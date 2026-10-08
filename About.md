@@ -1,9 +1,4 @@
-# Project Answers — AI-Powered Customer Operations System
-
-Answers to the four evaluation questions, based on the actual implementation in this
-repository (`n8n/workflows/ai-customer-ops-pipeline.json`, `supabase/schema.sql`,
-`dashboard/`).
-
+# About — AI-Powered Customer Operations System
 ---
 
 ## 1. Workflow Walkthrough
