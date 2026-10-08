@@ -527,15 +527,14 @@ Other rules:
 const nodes = [
   {
     id: nid(),
-    name: 'Gmail Trigger',
-    type: 'n8n-nodes-base.gmailTrigger',
-    typeVersion: 1.1,
+    name: 'Email Trigger (IMAP)',
+    type: 'n8n-nodes-base.emailReadImap',
+    typeVersion: 2.2,
     position: [0, 340],
     parameters: {
-      pollTimes: { itemMode: 'everyMinute' },
-      event: 'messageReceived',
-      simple: false,
-      filters: { labelIds: ['INBOX'], readStatus: 'unread' },
+      mailbox: 'INBOX',
+      postProcessAction: 'read',
+      format: 'simple',
       options: {},
     },
   },

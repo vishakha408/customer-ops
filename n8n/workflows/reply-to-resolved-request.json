@@ -1,0 +1,14 @@
+{
+  "name": "Reply to Resolved Request",
+  "nodes": [],
+  "connections": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f7a3c9e8-8b62-4d41-9f05-7e2c86a01d43",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

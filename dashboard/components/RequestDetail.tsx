@@ -5,6 +5,15 @@ import type { SupportRequest } from '@/lib/types';
 import { formatDateTime, formatMoney, relativeTime, shortId } from '@/lib/format';
 import { DecisionBadge, PriorityBadge, SentimentBadge, StatusBadge } from './Badges';
 
+function getFirstName(fullName: string | null, email: string): string {
+  if (fullName) {
+    const [first] = fullName.trim().split(/\s+/);
+    if (first) return first;
+  }
+  if (email && email.includes('@')) return email.split('@')[0];
+  return 'there';
+}
+
 export default function RequestDetail({
   requestId,
   onClose,
@@ -19,6 +28,10 @@ export default function RequestDetail({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState('');
+  const [showResolveModal, setShowResolveModal] = useState(false);
+  const [replySubject, setReplySubject] = useState('');
+  const [replyDraft, setReplyDraft] = useState('');
+  const [sendReply, setSendReply] = useState(true);
 
   const load = useCallback(async () => {
     try {
@@ -69,6 +82,59 @@ export default function RequestDetail({
 
   const applyNote = (fields: Record<string, unknown>) =>
     update(note.trim() ? { ...fields, resolution_note: note.trim() } : fields);
+
+  useEffect(() => {
+    if (!showResolveModal || !request) return;
+    const firstName = getFirstName(request.customer?.full_name ?? null, request.sender_email);
+    const baseNote = note.trim() || request.resolution_note?.trim() || 'Your request has been resolved.';
+    const draft = `Hi ${firstName},
+
+${baseNote}
+
+Thanks,
+Support Team`;
+    const subject = request.reply_subject?.trim() || `Re: ${request.subject}` || `Re: ${request.sender_email}`;
+    setReplySubject(subject);
+    setReplyDraft(request.reply_draft?.trim() || draft);
+    setSendReply(true);
+  }, [showResolveModal, request, note]);
+
+  const resolveWithReply = async () => {
+    if (!request) return;
+    setBusy(true);
+    try {
+      const payload: Record<string, unknown> = {
+        status: 'resolved',
+        reply_subject: replySubject.trim() || null,
+        reply_draft: replyDraft.trim() || null,
+        send_reply: sendReply && replyDraft.trim().length > 0,
+      };
+      const resolutionNote = note.trim();
+      if (resolutionNote) payload.resolution_note = resolutionNote;
+      await update(payload);
+      setShowResolveModal(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Resolve failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolveWithoutReply = async () => {
+    if (!request) return;
+    setBusy(true);
+    try {
+      const payload: Record<string, unknown> = { status: 'resolved', send_reply: false };
+      const resolutionNote = note.trim();
+      if (resolutionNote) payload.resolution_note = resolutionNote;
+      await update(payload);
+      setShowResolveModal(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Resolve failed');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <>
@@ -222,7 +288,7 @@ export default function RequestDetail({
                     <button
                       className="btn btn-primary"
                       disabled={busy}
-                      onClick={() => applyNote({ status: 'resolved' })}
+                      onClick={() => setShowResolveModal(true)}
                     >
                       Mark resolved
                     </button>
@@ -259,8 +325,7 @@ export default function RequestDetail({
                         <div className="entry">
                           <div>{activity.message}</div>
                           <div className="entry-meta">
-                            {formatDateTime(activity.created_at)} · {activity.actor} ·{' '}
-                            {activity.type}
+                            {formatDateTime(activity.created_at)} · {activity.actor} · {activity.type}
                           </div>
                         </div>
                       </li>
@@ -272,6 +337,79 @@ export default function RequestDetail({
           )}
         </div>
       </aside>
+
+      {showResolveModal && request && (
+        <>
+          <div className="overlay" onClick={() => setShowResolveModal(false)} />
+          <aside className="drawer drawer-sm" role="dialog" aria-modal="true" aria-label="Review reply before resolving">
+            <header className="drawer-header">
+              <div>
+                <h2>Resolve request</h2>
+                <div className="drawer-meta">
+                  <span className="tag mono">#{shortId(request.id)}</span>
+                  <StatusBadge status={request.status} />
+                </div>
+              </div>
+              <button className="btn btn-sm" onClick={() => setShowResolveModal(false)}>
+                Close
+              </button>
+            </header>
+            <div className="drawer-body">
+              <section className="section">
+                <h3 className="section-title">Customer reply (review before sending)</h3>
+                <label className="field-label" htmlFor="reply-subject">
+                  Subject
+                </label>
+                <input
+                  id="reply-subject"
+                  className="input"
+                  value={replySubject}
+                  onChange={(event) => setReplySubject(event.target.value)}
+                  disabled={busy}
+                />
+                <label className="field-label" htmlFor="reply-body" style={{ marginTop: 12 }}>
+                  Body
+                </label>
+                <textarea
+                  id="reply-body"
+                  className="note"
+                  style={{ minHeight: 180 }}
+                  value={replyDraft}
+                  onChange={(event) => setReplyDraft(event.target.value)}
+                  disabled={busy}
+                />
+                <label className="checkbox" style={{ marginTop: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={sendReply}
+                    onChange={(event) => setSendReply(event.target.checked)}
+                    disabled={busy}
+                  />
+                  <span>Send this reply to the customer</span>
+                </label>
+                <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
+                  If unchecked, the request will be marked resolved with no email sent.
+                </p>
+              </section>
+              <div className="actions">
+                <button
+                  className="btn btn-primary"
+                  disabled={busy || (sendReply && replyDraft.trim().length === 0)}
+                  onClick={() => void resolveWithReply()}
+                >
+                  {sendReply ? 'Send reply & resolve' : 'Save & resolve'}
+                </button>
+                <button className="btn" disabled={busy} onClick={() => void resolveWithoutReply()}>
+                  Resolve without replying
+                </button>
+                <button className="btn" disabled={busy} onClick={() => setShowResolveModal(false)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </aside>
+        </>
+      )}
     </>
   );
 }

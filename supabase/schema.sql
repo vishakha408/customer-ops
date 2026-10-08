@@ -220,3 +220,11 @@ create policy "anon can read activities"
 
 -- No insert/update/delete policies for anon: writes go through the
 -- service-role key (dashboard API routes + n8n).
+
+-- Add columns for operator-reviewed resolution replies
+ALTER TABLE requests
+  ADD COLUMN IF NOT EXISTS reply_subject   text,
+  ADD COLUMN IF NOT EXISTS reply_draft     text,
+  ADD COLUMN IF NOT EXISTS reply_sent_at   timestamptz,
+  ADD COLUMN IF NOT EXISTS reply_sent_error text;
+
