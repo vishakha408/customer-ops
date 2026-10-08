@@ -42,19 +42,32 @@ export default function Dashboard({ initialRequestId }: { initialRequestId?: str
 
   const load = useCallback(async () => {
     try {
-      const [requestsRes, metricsRes] = await Promise.all([
-        fetch('/api/requests?limit=200', { cache: 'no-store' }),
-        fetch('/api/metrics', { cache: 'no-store' }),
-      ]);
+      const res = await fetch('/api/requests?limit=200', { cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      const rows: SupportRequest[] = data.requests ?? [];
+      setRequests(rows);
 
-      const requestsData = await requestsRes.json();
-      if (!requestsRes.ok) throw new Error(requestsData.error ?? `HTTP ${requestsRes.status}`);
-      setRequests(requestsData.requests ?? []);
-
-      if (metricsRes.ok) {
-        const metricsData = await metricsRes.json();
-        setMetrics(metricsData.metrics);
+      // Compute metrics from the same snapshot so counts always match the table.
+      const m: DashboardMetrics = {
+        total: rows.length, new: 0, analyzing: 0, pending_review: 0,
+        in_progress: 0, auto_handled: 0, resolved: 0, failed: 0,
+        urgent_open: 0, negative_sentiment_open: 0, avg_minutes_to_resolve: null,
+      };
+      let resolveSum = 0;
+      let resolveCount = 0;
+      for (const r of rows) {
+        if (r.status in m) (m[r.status as keyof DashboardMetrics] as number)++;
+        const open = ['new', 'analyzing', 'pending_review', 'in_progress'].includes(r.status);
+        if (open && r.priority === 'urgent') m.urgent_open++;
+        if (open && (r.sentiment === 'negative' || r.sentiment === 'angry')) m.negative_sentiment_open++;
+        if (r.resolved_at && r.created_at) {
+          resolveSum += (new Date(r.resolved_at).getTime() - new Date(r.created_at).getTime()) / 60000;
+          resolveCount++;
+        }
       }
+      m.avg_minutes_to_resolve = resolveCount > 0 ? Math.round(resolveSum / resolveCount) : null;
+      setMetrics(m);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');

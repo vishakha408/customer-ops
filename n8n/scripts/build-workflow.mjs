@@ -213,12 +213,15 @@ if (first.payload && Array.isArray(first.payload.headers)) {
   messageId = String(first.id || '');
 } else {
   // ---- webhook / dashboard payload --------------------------------
-  email = String(first.email || first.sender_email || '');
-  name = String(first.name || first.full_name || '');
-  subject = String(first.subject || first.title || '');
-  body = String(first.body || first.message || first.text || '');
-  threadId = String(first.threadId || '');
-  messageId = String(first.messageId || '');
+  // n8n Webhook node wraps the POSTed JSON in .body; fall back to the
+  // top level so flat payloads (curl, tests) keep working too.
+  const p = (first.body && typeof first.body === 'object') ? first.body : first;
+  email = String(p.email || p.sender_email || '');
+  name = String(p.name || p.full_name || '');
+  subject = String(p.subject || p.title || '');
+  body = String(p.body || p.message || p.text || '');
+  threadId = String(p.threadId || '');
+  messageId = String(p.messageId || '');
   if (!subject) {
     subject = '(no subject)';
     warnings.push('Subject was missing - a default was applied');
@@ -377,6 +380,7 @@ if (!parsed) {
         analysisFailed: true,
         aiError:
           (agentItem.aiError || 'Model returned unparseable output').slice(0, 500),
+        rawAnalysis: { raw: raw.slice(0, 2000), parseError: true },
       },
     },
   ];
@@ -444,6 +448,7 @@ return [
       needsHuman: decision !== 'auto_resolve',
       analysisFailed: false,
       aiError: '',
+      rawAnalysis: parsed,
     },
   },
 ];`;
@@ -722,6 +727,14 @@ const nodes = [
       ['id', 'string', '={{ $("Create Request").first().json.id }}'],
       ['status', 'string', 'pending_review'],
       ['decision', 'string', '={{ $("Parse Analysis").first().json.decision }}'],
+      ['intent', 'string', '={{ $("Parse Analysis").first().json.intent }}'],
+      ['category', 'string', '={{ $("Parse Analysis").first().json.category }}'],
+      ['priority', 'string', '={{ $("Parse Analysis").first().json.priority }}'],
+      ['sentiment', 'string', '={{ $("Parse Analysis").first().json.sentiment }}'],
+      ['summary', 'string', '={{ $("Parse Analysis").first().json.summary }}'],
+      ['recommended_action', 'string', '={{ $("Parse Analysis").first().json.recommended_action }}'],
+      ['confidence', 'number', '={{ $("Parse Analysis").first().json.confidence }}'],
+      ['raw_analysis', 'object', '={{ $("Parse Analysis").first().json.rawAnalysis }}'],
       ['reply_sent', 'boolean', false],
       ['analyzed_at', 'string', '={{ new Date().toISOString() }}'],
     ],
@@ -754,6 +767,14 @@ const nodes = [
       ['id', 'string', '={{ $("Create Request").first().json.id }}'],
       ['status', 'string', 'auto_handled'],
       ['decision', 'string', '={{ $("Parse Analysis").first().json.decision }}'],
+      ['intent', 'string', '={{ $("Parse Analysis").first().json.intent }}'],
+      ['category', 'string', '={{ $("Parse Analysis").first().json.category }}'],
+      ['priority', 'string', '={{ $("Parse Analysis").first().json.priority }}'],
+      ['sentiment', 'string', '={{ $("Parse Analysis").first().json.sentiment }}'],
+      ['summary', 'string', '={{ $("Parse Analysis").first().json.summary }}'],
+      ['recommended_action', 'string', '={{ $("Parse Analysis").first().json.recommended_action }}'],
+      ['confidence', 'number', '={{ $("Parse Analysis").first().json.confidence }}'],
+      ['raw_analysis', 'object', '={{ $("Parse Analysis").first().json.rawAnalysis }}'],
       ['reply_sent', 'boolean', true],
       ['analyzed_at', 'string', '={{ new Date().toISOString() }}'],
       ['resolved_at', 'string', '={{ new Date().toISOString() }}'],
@@ -766,6 +787,14 @@ const nodes = [
       ['id', 'string', '={{ $json.requestId }}'],
       ['status', 'string', 'failed'],
       ['decision', 'string', '={{ $("Parse Analysis").first().json.decision }}'],
+      ['intent', 'string', '={{ $("Parse Analysis").first().json.intent }}'],
+      ['category', 'string', '={{ $("Parse Analysis").first().json.category }}'],
+      ['priority', 'string', '={{ $("Parse Analysis").first().json.priority }}'],
+      ['sentiment', 'string', '={{ $("Parse Analysis").first().json.sentiment }}'],
+      ['summary', 'string', '={{ $("Parse Analysis").first().json.summary }}'],
+      ['recommended_action', 'string', '={{ $("Parse Analysis").first().json.recommended_action }}'],
+      ['confidence', 'number', '={{ $("Parse Analysis").first().json.confidence }}'],
+      ['raw_analysis', 'object', '={{ $("Parse Analysis").first().json.rawAnalysis }}'],
       ['reply_sent', 'boolean', false],
       ['last_error', 'string', '={{ $json.lastError }}'],
       ['analyzed_at', 'string', '={{ new Date().toISOString() }}'],

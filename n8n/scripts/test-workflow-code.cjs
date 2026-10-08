@@ -35,7 +35,7 @@ const gmailRaw = run(normalize, {
   threadId: 'thr1',
   payload: {
     headers: [
-      { name: 'From', value: 'Amelia Jones <amelia.jones@northwind.io>' },
+      { name: 'From', value: 'Priya Sharma <priya.sharma@bharatmart.in>' },
       { name: 'Subject', value: 'Cannot log in' },
     ],
     parts: [
@@ -49,8 +49,8 @@ const gmailRaw = run(normalize, {
     ],
   },
 });
-check('raw gmail parses sender', gmailRaw.email === 'amelia.jones@northwind.io');
-check('raw gmail parses name', gmailRaw.name === 'Amelia Jones', gmailRaw.name);
+check('raw gmail parses sender', gmailRaw.email === 'priya.sharma@bharatmart.in');
+check('raw gmail parses name', gmailRaw.name === 'Priya Sharma', gmailRaw.name);
 check('raw gmail parses subject', gmailRaw.subject === 'Cannot log in');
 check('raw gmail decodes body', gmailRaw.body.includes('locked out'), gmailRaw.body);
 check('raw gmail source=email', gmailRaw.source === 'email');
@@ -58,19 +58,19 @@ check('raw gmail messageId', gmailRaw.messageId === 'msg123');
 
 const simplified = run(normalize, {
   id: 'm2',
-  from: 'Bruno Santos <bruno@vertexlabs.co>',
+  from: 'Rahul Verma <rahul@techveda.co.in>',
   subject: 'Upgrade question',
   snippet: 'Can we move to Pro?',
 });
-check('simplified gmail sender', simplified.email === 'bruno@vertexlabs.co');
+check('simplified gmail sender', simplified.email === 'rahul@techveda.co.in');
 check('simplified gmail snippet body', simplified.body === 'Can we move to Pro?');
 
 const webhook = run(normalize, {
-  email: 'Chen.Wei@atlas-retail.com',
+  email: 'Ananya.Iyer@kalparetail.in',
   subject: 'API errors',
   body: '500s on /v2/orders',
 });
-check('webhook email normalised', webhook.email === 'chen.wei@atlas-retail.com');
+check('webhook email normalised', webhook.email === 'ananya.iyer@kalparetail.in');
 check('webhook source', webhook.source === 'webhook');
 check('webhook body', webhook.body === '500s on /v2/orders');
 
@@ -85,6 +85,40 @@ const empty = run(normalize, {});
 check(
   'empty payload -> defaults + warnings',
   empty.subject === '(no subject)' && empty.intakeWarnings.length >= 1,
+);
+
+// The n8n Webhook node (v2) wraps the POSTed JSON in a `body` key, so the
+// real shape is { headers, params, query, body: { email, subject, body } }.
+const wrapped = run(normalize, {
+  headers: { 'content-type': 'application/json' },
+  params: {},
+  query: {},
+  body: {
+    email: 'Priya.Sharma@bharatmart.in',
+    name: 'Priya Sharma',
+    subject: 'Refund for invoice 1042',
+    body: 'We were charged twice - please refund.',
+  },
+});
+check('wrapped webhook email', wrapped.email === 'priya.sharma@bharatmart.in', wrapped.email);
+check('wrapped webhook name', wrapped.name === 'Priya Sharma', wrapped.name);
+check('wrapped webhook body', wrapped.body === 'We were charged twice - please refund.');
+check('wrapped webhook source', wrapped.source === 'webhook');
+check('wrapped webhook no warnings', wrapped.intakeWarnings.length === 0);
+
+const wrappedNoBody = run(normalize, { headers: {}, params: {}, query: {} });
+check(
+  'wrapped webhook missing body -> no crash, placeholder',
+  wrappedNoBody.email === 'unverified-sender@invalid.local' &&
+    wrappedNoBody.subject === '(no subject)',
+  JSON.stringify(wrappedNoBody.intakeWarnings),
+);
+
+const wrappedStringBody = run(normalize, { body: 'plain text body' });
+check(
+  'wrapped webhook string body -> no crash',
+  wrappedStringBody.source === 'webhook',
+  JSON.stringify(wrappedStringBody),
 );
 
 /* ---------------- Parse Analysis ---------------- */

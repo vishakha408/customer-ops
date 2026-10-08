@@ -79,7 +79,7 @@ faithfully.
 # a) Webhook entry point (use "Listen for test event" first)
 curl -X POST https://<n8n>/webhook/customer-ops-intake \
   -H "content-type: application/json" \
-  -d '{"email":"amelia.jones@northwind.io","subject":"Refund for invoice 1042",
+  -d '{"email":"priya.sharma@bharatmart.in","subject":"Refund for invoice 1042",
        "body":"Hi, we were charged twice for invoice 1042. Please refund the duplicate."}'
 ```
 

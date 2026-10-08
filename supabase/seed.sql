@@ -1,43 +1,44 @@
 -- ============================================================================
 -- Demo data for local development / dashboard screenshots.
 -- Run AFTER schema.sql. Everything is idempotent thanks to upserts.
+-- Indian demo data: names, +91 phone numbers, .in email domains, INR values.
 -- ============================================================================
 
 insert into public.customers (email, full_name, plan, lifetime_value, phone)
 values
-  ('amelia.jones@northwind.io',  'Amelia Jones',  'enterprise', 48200.00, '+1 415 555 0110'),
-  ('bruno.santos@vertexlabs.co', 'Bruno Santos',  'pro',         9120.00, '+1 415 555 0132'),
-  ('chen.wei@atlas-retail.com',  'Chen Wei',      'starter',     1150.00, '+1 415 555 0177'),
-  ('dana.k@brightpath.dev',      'Dana Kaplan',   'pro',         6400.00, '+1 415 555 0193')
+  ('priya.sharma@bharatmart.in', 'Priya Sharma', 'enterprise', 482000.00, '+91 98765 43210'),
+  ('rahul.verma@techveda.co.in', 'Rahul Verma',  'pro',         91200.00, '+91 98200 11223'),
+  ('ananya.iyer@kalparetail.in', 'Ananya Iyer',  'starter',     11500.00, '+91 98450 77889'),
+  ('vikram.singh@nexgenlabs.in', 'Vikram Singh', 'pro',         64000.00, '+91 99100 55667')
 on conflict (email) do nothing;
 
 with seed(email, subject, body, status, intent, category, priority, sentiment,
           summary, recommended_action, decision, confidence, resolution_note) as (
   values
-    ('amelia.jones@northwind.io',
+    ('priya.sharma@bharatmart.in',
      'Cannot access my account - urgent',
-     'I have been locked out of my account for 3 hours. We have an investor demo at 2pm and I cannot get in. This is extremely frustrating - we pay for the enterprise plan!',
+     'I have been locked out of my seller account for 3 hours. We have a Big Billion Days prep call at 2pm IST and I cannot get in. This is extremely frustrating - we pay for the enterprise plan!',
      'pending_review', 'login_issue', 'account_access', 'urgent', 'angry',
-     'Enterprise customer locked out before a critical demo; angry sentiment and urgent priority.',
+     'Enterprise customer locked out before a critical planning call; angry sentiment and urgent priority.',
      'Escalate to human support with password reset + session review',
      'escalate', 0.94::numeric, null),
-    ('bruno.santos@vertexlabs.co',
+    ('rahul.verma@techveda.co.in',
      'Question about upgrading my plan',
-     'Hi, we are growing and I think we need the Pro plan. Can you tell me what the differences are and how billing works when upgrading?',
+     'Hi, we are growing fast and I think we need the Pro plan now. Can you tell me what the differences are and how billing works when upgrading? We would prefer to pay via UPI or NEFT - please share the GST invoice process too.',
      'auto_handled', 'billing', 'plan_upgrade', 'medium', 'positive',
      'Prospective upgrade question; informational, no account risk.',
      'Send automated plan comparison + upgrade link',
-     'auto_resolve', 0.91::numeric, 'Auto-replied with plan comparison and upgrade link.'),
-    ('chen.wei@atlas-retail.com',
+     'auto_resolve', 0.91::numeric, 'Auto-replied with plan comparison, upgrade link and GST invoice details.'),
+    ('ananya.iyer@kalparetail.in',
      'API returning 500 errors since this morning',
-     'Your /v2/orders endpoint started returning 500 errors around 9am UTC. About 12% of our order syncs are failing. Please advise.',
+     'Your /v2/orders endpoint started returning 500 errors around 9am IST. About 12% of our order syncs are failing and it is hitting our Diwali sale prep. Please advise.',
      'in_progress', 'technical', 'api_incident', 'high', 'negative',
      'Production API errors affecting order sync; high impact but customer is calm.',
      'Route to engineering on-call with correlation IDs',
      'human_review', 0.88::numeric, null),
-    ('dana.k@brightpath.dev',
+    ('vikram.singh@nexgenlabs.in',
      'Thanks for the quick fix!',
-     'Just wanted to say the issue from last week was resolved fast. Great support team.',
+     'Just wanted to say the issue from last week was resolved fast. Great support team - truly appreciative!',
      'resolved', 'feedback', 'positive_feedback', 'low', 'positive',
      'Positive feedback; no action required beyond acknowledgement.',
      'Send thank-you note and log to account timeline',

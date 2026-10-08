@@ -72,7 +72,7 @@ npm run dev                     # http://localhost:3000
 ```bash
 curl -X POST http://localhost:3000/api/requests \
   -H "content-type: application/json" \
-  -d '{"email":"amelia.jones@northwind.io","subject":"Refund for invoice 1042",
+  -d '{"email":"priya.sharma@bharatmart.in","subject":"Refund for invoice 1042",
        "body":"We were charged twice for invoice 1042 - please refund the duplicate charge."}'
 ```
 
