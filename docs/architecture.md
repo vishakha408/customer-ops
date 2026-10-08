@@ -1,35 +1,5 @@
 # Architecture — AI-Powered Customer Operations System
 
-## Components
-
-```mermaid
-flowchart LR
-  subgraph Intake
-    GM[Gmail inbox] --> GT[Gmail Trigger]
-    WH[POST /api/webhook/intake] --> N8N
-    UI[Dashboard "+ New request"] --> API[POST /api/requests]
-    API --> SB[(Supabase)]
-    GT --> N8N[n8n workflow]
-    WH -. forwarded .-> N8N
-  end
-
-  subgraph n8n
-    N8N --> AG[AI Agent<br/>Claude]
-    AG --> DEC{Requires<br/>human?}
-    DEC -- no --> RA[Reply via Gmail<br/>status: auto_handled]
-    DEC -- yes --> AL[Alert ops via Gmail<br/>status: pending_review]
-    RA --> UPD[Update status]
-    AL --> UPD
-    ERR[Failures] --> UPD
-    UPD --> SB
-  end
-
-  subgraph Dashboard
-    SB --> API2[Next.js API routes] --> DASH[React dashboard]
-    DASH -- PATCH /api/requests/id --> API2
-  end
-```
-
 | Layer | Technology | Role |
 | --- | --- | --- |
 | Orchestration | n8n | Intake, AI call, routing, email sending, status writes |
