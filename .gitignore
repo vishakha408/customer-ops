@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js
+dashboard/.next/
+dashboard/out/
+next-env.d.ts
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db
+
+# n8n local history
+n8n/.n8n/
+
+# Build
+dashboard/coverage/
+dist/
+
+*.tsbuildinfo

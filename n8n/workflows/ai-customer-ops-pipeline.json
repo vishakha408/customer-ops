@@ -1,0 +1,1119 @@
+{
+  "name": "AI Customer Operations Pipeline",
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        340
+      ],
+      "parameters": {
+        "pollTimes": {
+          "itemMode": "everyMinute"
+        },
+        "event": "messageReceived",
+        "simple": false,
+        "filters": {
+          "labelIds": [
+            "INBOX"
+          ],
+          "readStatus": "unread"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Webhook Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        560
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "customer-ops-intake",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "b7f3c1a2-9d4e-4f6b-8c2a-1e5d9f0a3b7c"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "name": "Normalize Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        420
+      ],
+      "parameters": {
+        "jsCode": "// Normalises the two entry points into a single request shape:\n//   1. Gmail Trigger  (raw Gmail message, Simplify = false)\n//   2. Webhook Intake (JSON body from the dashboard / external system)\nconst first = $input.first().json;\nconst warnings = [];\n\nfunction decodeBase64Url(data) {\n  try {\n    return Buffer.from(data, 'base64url').toString('utf8');\n  } catch (e) {\n    return '';\n  }\n}\n\nfunction collectBodies(payload, out) {\n  if (!payload) return;\n  if (payload.body && payload.body.data) out.push(decodeBase64Url(payload.body.data));\n  (payload.parts || []).forEach((part) => collectBodies(part, out));\n}\n\nfunction stripHtml(html) {\n  return String(html)\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction splitAddress(raw) {\n  const angled = String(raw || '').match(/^(.*)<([^>]+)>/);\n  if (angled) {\n    return {\n      name: angled[1].trim().replace(/^\"|\"$/g, ''),\n      email: angled[2].trim(),\n    };\n  }\n  const value = String(raw || '').trim();\n  return { name: value.split('@')[0], email: value };\n}\n\nlet email = '';\nlet name = '';\nlet subject = '';\nlet body = '';\nlet threadId = '';\nlet messageId = '';\nlet source = 'webhook';\n\nif (first.payload && Array.isArray(first.payload.headers)) {\n  // ---- raw Gmail message ------------------------------------------\n  source = 'email';\n  const headers = {};\n  first.payload.headers.forEach((h) => {\n    headers[String(h.name).toLowerCase()] = h.value;\n  });\n  const from = splitAddress(headers.from);\n  email = from.email;\n  name = from.name;\n  subject = String(headers.subject || '(no subject)');\n  const chunks = [];\n  collectBodies(first.payload, chunks);\n  body = chunks.join('\\n').trim();\n  if (!body && first.text) body = String(first.text).trim();\n  if (!body && first.html) body = stripHtml(first.html);\n  if (!body && first.snippet) body = String(first.snippet).trim();\n  threadId = String(first.threadId || '');\n  messageId = String(first.id || '');\n} else if (first.from) {\n  // ---- simplified Gmail message -----------------------------------\n  source = 'email';\n  const from = splitAddress(first.from);\n  email = from.email;\n  name = from.name;\n  subject = String(first.subject || '(no subject)');\n  if (first.text) body = String(first.text).trim();\n  else if (first.html) body = stripHtml(first.html);\n  else body = String(first.snippet || '').trim();\n  threadId = String(first.threadId || '');\n  messageId = String(first.id || '');\n} else {\n  // ---- webhook / dashboard payload --------------------------------\n  email = String(first.email || first.sender_email || '');\n  name = String(first.name || first.full_name || '');\n  subject = String(first.subject || first.title || '');\n  body = String(first.body || first.message || first.text || '');\n  threadId = String(first.threadId || '');\n  messageId = String(first.messageId || '');\n  if (!subject) {\n    subject = '(no subject)';\n    warnings.push('Subject was missing - a default was applied');\n  }\n  if (!body.trim()) warnings.push('Request body was empty');\n}\n\nemail = String(email).trim().toLowerCase();\nconst bracketed = email.match(/<([^>]+)>/);\nif (bracketed) email = bracketed[1].trim();\n\nif (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {\n  warnings.push('Sender address missing or invalid - routed to human review');\n  email = 'unverified-sender@invalid.local';\n}\nif (!name) name = email.split('@')[0];\nif (body.length > 8000) {\n  body = body.slice(0, 8000);\n  warnings.push('Message was truncated to 8000 characters');\n}\n\nreturn [\n  {\n    json: {\n      email,\n      name,\n      subject,\n      body,\n      threadId,\n      messageId,\n      source,\n      receivedAt: new Date().toISOString(),\n      intakeWarnings: warnings,\n    },\n  },\n];"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "Find Customer",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        460,
+        420
+      ],
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "customers",
+        "returnAll": false,
+        "limit": 1,
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "email",
+              "condition": "eq",
+              "keyValue": "={{ $json.email }}"
+            }
+          ]
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "name": "Customer Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        680,
+        420
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000006",
+              "leftValue": "={{ !!$json.email }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000007",
+      "name": "Create Customer",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        900,
+        540
+      ],
+      "parameters": {
+        "operation": "create",
+        "tableId": "customers",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "email",
+              "fieldValue": "={{ $(\"Normalize Request\").first().json.email }}"
+            },
+            {
+              "fieldId": "full_name",
+              "fieldValue": "={{ $(\"Normalize Request\").first().json.name }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000008",
+      "name": "Prepare Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        420
+      ],
+      "parameters": {
+        "jsCode": "// Builds the prompt context for the AI agent and the column-aligned record\n// for the \"Create Request\" row (auto-mapped with \"Inputs to Ignore\").\nfunction safeFirst(nodeName) {\n  try {\n    const item = $(nodeName).first();\n    return item ? item.json : null;\n  } catch (e) {\n    return null; // node did not run on this branch\n  }\n}\n\nconst intake = safeFirst('Normalize Request') || {};\nconst found = safeFirst('Find Customer');\nconst created = safeFirst('Create Customer');\n\nlet customer = null;\nif (found && found.email) customer = found;\nelse if (created && created.email) customer = created;\n\nconst context = {\n  request: {\n    subject: intake.subject,\n    body: intake.body,\n    sender_email: intake.email,\n    sender_name: intake.name,\n    source: intake.source,\n    received_at: intake.receivedAt,\n    intake_warnings: intake.intakeWarnings || [],\n  },\n  customer: customer\n    ? {\n        id: customer.id,\n        full_name: customer.full_name,\n        plan: customer.plan,\n        lifetime_value: customer.lifetime_value,\n        open_requests: customer.open_requests,\n        notes: customer.notes || null,\n      }\n    : null,\n};\n\nreturn [\n  {\n    json: {\n      sender_email: intake.email,\n      subject: intake.subject,\n      body: intake.body,\n      source: intake.source,\n      thread_id: intake.threadId || null,\n      message_id: intake.messageId || null,\n      customer_id: customer ? customer.id : null,\n      status: 'analyzing',\n      context: JSON.stringify(context, null, 2),\n      customerKnown: Boolean(customer),\n      intakeWarnings: intake.intakeWarnings || [],\n    },\n  },\n];"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000009",
+      "name": "Create Request",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        420
+      ],
+      "parameters": {
+        "operation": "create",
+        "tableId": "requests",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": "context,customerKnown,intakeWarnings"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000010",
+      "name": "Intake Failure Alert",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [
+        1560,
+        640
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "00000000-0000-4000-8000-000000000011",
+              "name": "to",
+              "type": "string",
+              "value": "customer-ops@yourcompany.com"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000012",
+              "name": "subject",
+              "type": "string",
+              "value": "[Customer Ops] FAILED to record a new request"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000013",
+              "name": "message",
+              "type": "string",
+              "value": "='The intake step failed, so this request is NOT stored in Supabase and needs manual handling.\\n\\nSender: ' + $('Normalize Request').first().json.email + '\\nSubject: ' + $('Normalize Request').first().json.subject + '\\n\\nError: ' + JSON.stringify($json).slice(0, 500)"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000014",
+      "name": "Send Intake Failure Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1780,
+        640
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.message }}",
+        "options": {
+          "addAttribution": false
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000015",
+      "name": "Log Request Created",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        340
+      ],
+      "parameters": {
+        "operation": "create",
+        "tableId": "request_activities",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "request_id",
+              "fieldValue": "={{ $json.id }}"
+            },
+            {
+              "fieldId": "type",
+              "fieldValue": "intake"
+            },
+            {
+              "fieldId": "actor",
+              "fieldValue": "n8n"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{ 'Request received via ' + $json.source + ' from ' + $json.sender_email + ' - ' + $json.subject }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000016",
+      "name": "Mark Email Read",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1780,
+        340
+      ],
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $(\"Normalize Request\").first().json.messageId }}"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000017",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        2000,
+        340
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.context }}",
+        "options": {
+          "systemMessage": "You are the AI analyst for an AI-powered customer operations system.\n\nYou receive ONE customer request as JSON with two keys:\n- \"request\": the incoming customer message (sender, subject, body, source, intake_warnings)\n- \"customer\": the CRM record for this sender, or null when unknown\n\nAnalyse the request and respond with ONLY a single JSON object. No markdown, no commentary, no code fences.\n\nRequired schema:\n{\n  \"intent\": \"machine-readable intent, e.g. login_issue, password_reset, billing_question, plan_upgrade, refund_request, bug_report, outage, cancel_subscription, feedback, shipping, other\",\n  \"category\": \"one of: account_access, billing, technical, shipping, product, feedback, compliance, other\",\n  \"priority\": \"one of: low, medium, high, urgent\",\n  \"sentiment\": \"one of: positive, neutral, negative, angry\",\n  \"summary\": \"1-2 sentence summary of what the customer wants\",\n  \"recommended_action\": \"the concrete next step for the customer operations team\",\n  \"decision\": \"one of: auto_resolve, human_review, escalate\",\n  \"confidence\": 0.0 to 1.0,\n  \"reply\": {\n    \"subject\": \"subject line for the reply email\",\n    \"body\": \"complete, customer-ready plain-text reply\"\n  }\n}\n\nDecision rules:\n- auto_resolve: only routine, low-risk requests you can fully answer from the context (plan questions, FAQs, password reset instructions, positive feedback). The reply must be complete and ready to send.\n- human_review: anything that changes account state, involves money (refunds, credits, cancellations), legal or compliance topics, ambiguous intent, missing information, technical incidents, or when confidence is below 0.7.\n- escalate: outages, security or data-loss incidents, threats, legal action, or angry enterprise customers.\n\nOther rules:\n- Never invent prices, policies, refunds, discounts, account data or deadlines that are not in the context. If a needed fact is missing, choose human_review.\n- priority \"urgent\" is reserved for time-critical or business-stopping issues.\n- If request.intake_warnings is non-empty or customer is null, never choose auto_resolve.\n- When decision is not auto_resolve, still fill reply.body with what a human agent should send.\n- Keep replies polite, specific and free of placeholders such as [insert ...]."
+        }
+      },
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000018",
+      "name": "Anthropic Claude",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        2000,
+        540
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-5-20250929",
+          "mode": "list",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000019",
+      "name": "AI Failure Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        540
+      ],
+      "parameters": {
+        "jsCode": "// Normalises the AI Agent error output so \"Parse Analysis\" always receives\n// the same shape, whether the model succeeded or failed.\nconst err = $input.first().json || {};\nconst detail =\n  (err.error && err.error.message) ||\n  err.message ||\n  (typeof err.error === 'string' ? err.error : '') ||\n  'AI agent produced no output';\n\nreturn [\n  {\n    json: {\n      output: '',\n      aiError: String(detail).slice(0, 500),\n    },\n  },\n];"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000020",
+      "name": "Parse Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        340
+      ],
+      "parameters": {
+        "jsCode": "// Parses + validates the model output and applies deterministic guardrails.\n// The model never routes on its own: every safety rule below is plain code.\nconst agentItem = $('AI Agent').first().json;\nconst intake = $('Normalize Request').first().json;\nconst raw = typeof agentItem.output === 'string' ? agentItem.output.trim() : '';\nconst warnings = intake.intakeWarnings || [];\n\nfunction parseJsonObject(text) {\n  if (!text) return null;\n  const cleaned = text.replace(/^\\`\\`\\`(?:json)?/i, '').replace(/\\`\\`\\`$/i, '').trim();\n  const start = cleaned.indexOf('{');\n  const end = cleaned.lastIndexOf('}');\n  if (start === -1 || end <= start) return null;\n  try {\n    const parsed = JSON.parse(cleaned.slice(start, end + 1));\n    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)\n      ? parsed\n      : null;\n  } catch (e) {\n    return null;\n  }\n}\n\nconst parsed = parseJsonObject(raw);\n\nif (!parsed) {\n  // No usable model output: never guess, hand the request to a human.\n  return [\n    {\n      json: {\n        intent: 'unclassified',\n        category: 'other',\n        priority: 'high',\n        sentiment: 'neutral',\n        summary: 'AI analysis unavailable - the model output could not be parsed.',\n        recommended_action:\n          'Manually triage this request: read the original message, classify it and reply to the customer.',\n        decision: 'human_review',\n        confidence: 0,\n        reply: { subject: '', body: '' },\n        needsHuman: true,\n        analysisFailed: true,\n        aiError:\n          (agentItem.aiError || 'Model returned unparseable output').slice(0, 500),\n      },\n    },\n  ];\n}\n\nconst priorities = ['low', 'medium', 'high', 'urgent'];\nconst sentiments = ['positive', 'neutral', 'negative', 'angry'];\nconst decisions = ['auto_resolve', 'human_review', 'escalate'];\nconst categories = [\n  'account_access',\n  'billing',\n  'technical',\n  'shipping',\n  'product',\n  'feedback',\n  'compliance',\n  'other',\n];\n\nconst intent =\n  typeof parsed.intent === 'string' && parsed.intent\n    ? parsed.intent.toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 60)\n    : 'other';\nconst category = categories.includes(parsed.category) ? parsed.category : 'other';\nconst priority = priorities.includes(parsed.priority) ? parsed.priority : 'medium';\nconst sentiment = sentiments.includes(parsed.sentiment) ? parsed.sentiment : 'neutral';\nconst summary =\n  typeof parsed.summary === 'string' ? parsed.summary.slice(0, 1000) : '';\nconst recommendedAction =\n  typeof parsed.recommended_action === 'string'\n    ? parsed.recommended_action.slice(0, 1000)\n    : 'Review the request manually';\nlet decision = decisions.includes(parsed.decision) ? parsed.decision : 'human_review';\nlet confidence =\n  typeof parsed.confidence === 'number' && isFinite(parsed.confidence)\n    ? Math.min(1, Math.max(0, parsed.confidence))\n    : 0;\nconst reply = {\n  subject:\n    parsed.reply && typeof parsed.reply.subject === 'string' ? parsed.reply.subject : '',\n  body:\n    parsed.reply && typeof parsed.reply.body === 'string' ? parsed.reply.body : '',\n};\n\n// ---- deterministic guardrails -----------------------------------------\nif (confidence < 0.6) decision = decision === 'auto_resolve' ? 'human_review' : decision;\nif (priority === 'urgent' && decision === 'auto_resolve') decision = 'escalate';\nif (sentiment === 'angry' && decision === 'auto_resolve') decision = 'human_review';\nif (warnings.length > 0 && decision === 'auto_resolve') decision = 'human_review';\nif (!intake.customerKnown && decision === 'auto_resolve') decision = 'human_review';\nif (decision === 'auto_resolve' && !reply.body) decision = 'human_review';\n\nreturn [\n  {\n    json: {\n      intent,\n      category,\n      priority,\n      sentiment,\n      summary,\n      recommended_action: recommendedAction,\n      decision,\n      confidence,\n      reply,\n      needsHuman: decision !== 'auto_resolve',\n      analysisFailed: false,\n      aiError: '',\n    },\n  },\n];"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000021",
+      "name": "Log Analysis",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2660,
+        340
+      ],
+      "parameters": {
+        "operation": "create",
+        "tableId": "request_activities",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "request_id",
+              "fieldValue": "={{ $(\"Create Request\").first().json.id }}"
+            },
+            {
+              "fieldId": "type",
+              "fieldValue": "analysis"
+            },
+            {
+              "fieldId": "actor",
+              "fieldValue": "agent"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{ 'AI analysis: ' + $json.intent + ' / ' + $json.category + ', priority ' + $json.priority + ', sentiment ' + $json.sentiment + ', decision ' + $json.decision + ' (confidence ' + $json.confidence + ')' }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000022",
+      "name": "Requires Human?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2880,
+        340
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000023",
+              "leftValue": "={{ $json.needsHuman }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000024",
+      "name": "Build Review Alert",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [
+        3100,
+        220
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "00000000-0000-4000-8000-000000000025",
+              "name": "to",
+              "type": "string",
+              "value": "customer-ops@yourcompany.com"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000026",
+              "name": "subject",
+              "type": "string",
+              "value": "={{ '[Customer Ops] ' + $('Parse Analysis').first().json.priority.toUpperCase() + ' - human review required: ' + $('Normalize Request').first().json.subject }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000027",
+              "name": "message",
+              "type": "string",
+              "value": "='A customer request requires human review.\\n\\nFrom: ' + $('Normalize Request').first().json.name + ' <' + $('Normalize Request').first().json.email + '>\\nSubject: ' + $('Normalize Request').first().json.subject + '\\nPriority: ' + $('Parse Analysis').first().json.priority + '\\nSentiment: ' + $('Parse Analysis').first().json.sentiment + '\\nDecision: ' + $('Parse Analysis').first().json.decision + '\\nConfidence: ' + $('Parse Analysis').first().json.confidence + '\\n\\nSummary: ' + $('Parse Analysis').first().json.summary + '\\nRecommended action: ' + $('Parse Analysis').first().json.recommended_action + ($('Parse Analysis').first().json.aiError ? '\\n\\nAI analysis error: ' + $('Parse Analysis').first().json.aiError : '') + '\\n\\nOriginal message:\\n' + $('Normalize Request').first().json.body + '\\n\\nDashboard: http://localhost:3000/requests/' + $('Create Request').first().json.id"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000028",
+      "name": "Send Review Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3320,
+        220
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.message }}",
+        "options": {
+          "addAttribution": false
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000029",
+      "name": "Alert Delivery Failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3540,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// The internal review alert email failed - the request still enters the\n// human queue, but the failure is surfaced here and in the execution log.\nconst err = $input.first().json || {};\nconst detail =\n  (err.error && err.error.message) ||\n  err.message ||\n  JSON.stringify(err).slice(0, 300);\n\nreturn [\n  {\n    json: {\n      alertDeliveryFailed: true,\n      warning: 'Ops review alert email failed: ' + String(detail).slice(0, 300),\n    },\n  },\n];"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000030",
+      "name": "Set Status Pending Review",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [
+        3760,
+        220
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "00000000-0000-4000-8000-000000000031",
+              "name": "id",
+              "type": "string",
+              "value": "={{ $(\"Create Request\").first().json.id }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000032",
+              "name": "status",
+              "type": "string",
+              "value": "pending_review"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000033",
+              "name": "decision",
+              "type": "string",
+              "value": "={{ $(\"Parse Analysis\").first().json.decision }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000034",
+              "name": "reply_sent",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000035",
+              "name": "analyzed_at",
+              "type": "string",
+              "value": "={{ new Date().toISOString() }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000036",
+      "name": "Build Customer Reply",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [
+        3100,
+        480
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "00000000-0000-4000-8000-000000000037",
+              "name": "to",
+              "type": "string",
+              "value": "={{ $(\"Normalize Request\").first().json.email }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000038",
+              "name": "subject",
+              "type": "string",
+              "value": "={{ 'Re: ' + $('Normalize Request').first().json.subject }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000039",
+              "name": "message",
+              "type": "string",
+              "value": "={{ $('Parse Analysis').first().json.reply.body || 'Thanks for reaching out to us. A member of our team will follow up shortly.' }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000040",
+      "name": "Send Customer Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3320,
+        480
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.message }}",
+        "options": {
+          "addAttribution": false
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000041",
+      "name": "Handle Send Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3540,
+        600
+      ],
+      "parameters": {
+        "jsCode": "// The customer reply could not be delivered - record why so the request can\n// be retried by a human instead of silently disappearing.\nconst requestId = $('Create Request').first().json.id;\nconst err = $input.first().json || {};\nconst detail =\n  (err.error && err.error.message) ||\n  err.message ||\n  (typeof err.error === 'string' ? err.error : '') ||\n  JSON.stringify(err).slice(0, 300);\n\nreturn [\n  {\n    json: {\n      requestId,\n      lastError: 'Customer reply could not be delivered: ' + String(detail).slice(0, 400),\n    },\n  },\n];"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000042",
+      "name": "Set Status Auto Resolved",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [
+        3760,
+        400
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "00000000-0000-4000-8000-000000000043",
+              "name": "id",
+              "type": "string",
+              "value": "={{ $(\"Create Request\").first().json.id }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000044",
+              "name": "status",
+              "type": "string",
+              "value": "auto_handled"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000045",
+              "name": "decision",
+              "type": "string",
+              "value": "={{ $(\"Parse Analysis\").first().json.decision }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000046",
+              "name": "reply_sent",
+              "type": "boolean",
+              "value": true
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000047",
+              "name": "analyzed_at",
+              "type": "string",
+              "value": "={{ new Date().toISOString() }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000048",
+              "name": "resolved_at",
+              "type": "string",
+              "value": "={{ new Date().toISOString() }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000049",
+      "name": "Set Status Failed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [
+        3760,
+        600
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "00000000-0000-4000-8000-000000000050",
+              "name": "id",
+              "type": "string",
+              "value": "={{ $json.requestId }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000051",
+              "name": "status",
+              "type": "string",
+              "value": "failed"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000052",
+              "name": "decision",
+              "type": "string",
+              "value": "={{ $(\"Parse Analysis\").first().json.decision }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000053",
+              "name": "reply_sent",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000054",
+              "name": "last_error",
+              "type": "string",
+              "value": "={{ $json.lastError }}"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000055",
+              "name": "analyzed_at",
+              "type": "string",
+              "value": "={{ new Date().toISOString() }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000056",
+      "name": "Update Request Status",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        3980,
+        420
+      ],
+      "parameters": {
+        "operation": "update",
+        "tableId": "requests",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": "",
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000057",
+      "name": "Log Status Activity",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        4200,
+        420
+      ],
+      "parameters": {
+        "operation": "create",
+        "tableId": "request_activities",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "request_id",
+              "fieldValue": "={{ $json.id }}"
+            },
+            {
+              "fieldId": "type",
+              "fieldValue": "={{ $json.status === 'auto_handled' ? 'auto_resolution' : ($json.status === 'failed' ? 'error' : 'review_requested') }}"
+            },
+            {
+              "fieldId": "actor",
+              "fieldValue": "n8n"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{ $json.status === 'auto_handled' ? 'AI auto-resolved the request and emailed the customer' : ($json.status === 'failed' ? 'Workflow error: ' + ($json.last_error || 'unknown error') : 'Routed to the human review queue (decision: ' + $json.decision + ')' + ($('Parse Analysis').first().json.aiError ? ' - AI error: ' + $('Parse Analysis').first().json.aiError : '')) }}"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Intake": {
+      "main": [
+        [
+          {
+            "node": "Normalize Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Request": {
+      "main": [
+        [
+          {
+            "node": "Find Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Customer": {
+      "main": [
+        [
+          {
+            "node": "Customer Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Customer Found?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Customer": {
+      "main": [
+        [
+          {
+            "node": "Prepare Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Context": {
+      "main": [
+        [
+          {
+            "node": "Create Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Request": {
+      "main": [
+        [
+          {
+            "node": "Log Request Created",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Intake Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intake Failure Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Intake Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Request Created": {
+      "main": [
+        [
+          {
+            "node": "Mark Email Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Email Read": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Failure Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "ai_languageModel": [
+        [
+          {
+            "node": "Anthropic Claude",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Failure Handler": {
+      "main": [
+        [
+          {
+            "node": "Parse Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Analysis": {
+      "main": [
+        [
+          {
+            "node": "Log Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Analysis": {
+      "main": [
+        [
+          {
+            "node": "Requires Human?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Requires Human?": {
+      "main": [
+        [
+          {
+            "node": "Build Review Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Customer Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Review Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Review Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Review Alert": {
+      "main": [
+        [
+          {
+            "node": "Set Status Pending Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Delivery Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Delivery Failed": {
+      "main": [
+        [
+          {
+            "node": "Set Status Pending Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Customer Reply": {
+      "main": [
+        [
+          {
+            "node": "Send Customer Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Customer Reply": {
+      "main": [
+        [
+          {
+            "node": "Set Status Auto Resolved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Send Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Send Failure": {
+      "main": [
+        [
+          {
+            "node": "Set Status Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Status Auto Resolved": {
+      "main": [
+        [
+          {
+            "node": "Update Request Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Status Pending Review": {
+      "main": [
+        [
+          {
+            "node": "Update Request Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Status Failed": {
+      "main": [
+        [
+          {
+            "node": "Update Request Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Request Status": {
+      "main": [
+        [
+          {
+            "node": "Log Status Activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
