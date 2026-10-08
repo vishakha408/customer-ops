@@ -1,0 +1,331 @@
+﻿{
+  "name": "Reply to Resolved Request",
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "send-resolution-reply",
+        "responseMode": "onReceived",
+        "responseCode": 200
+      },
+      "webhookId": "send-resolution-reply"
+    },
+    {
+      "id": "get-request",
+      "name": "Get Request",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [420, 300],
+      "parameters": {
+        "operation": "get",
+        "tableId": "requests",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.body.requestId }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "check-request",
+      "name": "Check Request Found",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [640, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            { "id": "found", "leftValue": "={{ $json.id }}", "operator": { "type": "string", "operation": "notEmpty" } }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "build-email",
+      "name": "Build Email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [880, 200],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "to", "name": "to", "type": "string", "value": "={{ $('Get Request').first().json.sender_email || $('Get Request').first().json.email }}" },
+            { "id": "subject", "name": "subject", "type": "string", "value": "={{ $('Get Request').first().json.reply_subject || $('Get Request').first().json.subject }}" },
+            { "id": "message", "name": "message", "type": "string", "value": "={{ $('Get Request').first().json.reply_draft }}" },
+            { "id": "requestId", "name": "requestId", "type": "string", "value": "={{ $('Get Request').first().json.id }}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "validate-draft",
+      "name": "Validate Draft",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1100, 200],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            { "id": "hasDraft", "leftValue": "={{ $json.message }}", "operator": { "type": "string", "operation": "notEmpty" } },
+            { "id": "hasTo", "leftValue": "={{ $json.to }}", "operator": { "type": "string", "operation": "notEmpty" } }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "send-reply",
+      "name": "Send Resolution Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1340, 140],
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.message }}",
+        "options": { "addAttribution": false }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "handle-send-success",
+      "name": "Handle Send Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [1580, 120],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "reqId", "name": "requestId", "type": "string", "value": "={{ $('Build Email').first().json.requestId }}" },
+            { "id": "ok", "name": "success", "type": "boolean", "value": true }
+          ]
+        }
+      }
+    },
+    {
+      "id": "handle-send-failure",
+      "name": "Handle Send Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 260],
+      "parameters": {
+        "jsCode": "const reqId = $('Build Email').first().json.requestId; const err = $input.first().json || {}; const detail = (err.error && err.error.message) || err.message || (typeof err.error === 'string' ? err.error : '') || JSON.stringify(err).slice(0,400); return [{json:{requestId:reqId,success:false,error:'Failed to send resolution reply: '+String(detail).slice(0,800)}}];"
+      }
+    },
+    {
+      "id": "update-request-success",
+      "name": "Update Request (Sent)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1820, 120],
+      "parameters": {
+        "operation": "update",
+        "tableId": "requests",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "reply_sent_at", "fieldValue": "={{ new Date().toISOString() }}" },
+            { "fieldId": "reply_sent_error", "fieldValue": null }
+          ]
+        },
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": { "conditions": [{ "keyName": "id", "condition": "eq", "keyValue": "={{ $json.requestId }}" }] }
+      }
+    },
+    {
+      "id": "update-request-failed",
+      "name": "Update Request (Failed)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1820, 260],
+      "parameters": {
+        "operation": "update",
+        "tableId": "requests",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "reply_sent_at", "fieldValue": null },
+            { "fieldId": "reply_sent_error", "fieldValue": "={{ $json.error }}" }
+          ]
+        },
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": { "conditions": [{ "keyName": "id", "condition": "eq", "keyValue": "={{ $json.requestId }}" }] }
+      }
+    },
+    {
+      "id": "log-activity-success",
+      "name": "Log Activity (Sent)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2060, 120],
+      "parameters": {
+        "operation": "create",
+        "tableId": "request_activities",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "request_id", "fieldValue": "={{ $json.requestId }}" },
+            { "fieldId": "type", "fieldValue": "resolution_reply_sent" },
+            { "fieldId": "actor", "fieldValue": "dashboard-operator" },
+            { "fieldId": "message", "fieldValue": "Resolution reply sent to customer after review" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "log-activity-failed",
+      "name": "Log Activity (Failed)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2060, 260],
+      "parameters": {
+        "operation": "create",
+        "tableId": "request_activities",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "request_id", "fieldValue": "={{ $json.requestId }}" },
+            { "fieldId": "type", "fieldValue": "resolution_reply_failed" },
+            { "fieldId": "actor", "fieldValue": "n8n" },
+            { "fieldId": "message", "fieldValue": "={{ $json.error }}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [2300, 120],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "resp", "name": "response", "type": "object", "value": "={\"success\": true}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "respond-failure",
+      "name": "Respond Failure",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [2300, 260],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "resp", "name": "response", "type": "object", "value": "={\"success\": false, \"error\": \"{{ $json.error }}\"}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "send-ops-alert",
+      "name": "Send Ops Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2060, 380],
+      "parameters": {
+        "sendTo": "={{ $env.OPS_TEAM_EMAIL || 'customer-ops@yourcompany.com' }}",
+        "subject": "Failed to send resolution reply",
+        "emailType": "text",
+        "message": "Request #{{ $json.requestId }} failed to send resolution reply.\n\nError: {{ $json.error }}\n\nCheck the n8n execution and dashboard for details.",
+        "options": { "addAttribution": false }
+      }
+    },
+    {
+      "id": "respond-missing",
+      "name": "Respond Missing Request",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [880, 380],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "resp", "name": "response", "type": "object", "value": "={\"success\": false, \"error\": \"Request not found\"}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "respond-invalid",
+      "name": "Respond Invalid Draft",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [1340, 340],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "resp", "name": "response", "type": "object", "value": "={\"success\": false, \"error\": \"Missing reply draft or recipient email\"}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "return-webhook",
+      "name": "Return Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2540, 200],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.response }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": { "main": [[{"node": "Get Request", "type": "main", "index": 0}]] },
+    "Get Request": { "main": [[{"node": "Check Request Found", "type": "main", "index": 0}]] },
+    "Check Request Found": {
+      "main": [
+        [{"node": "Build Email", "type": "main", "index": 0}],
+        [{"node": "Respond Missing Request", "type": "main", "index": 0}]
+      ]
+    },
+    "Build Email": { "main": [[{"node": "Validate Draft", "type": "main", "index": 0}]] },
+    "Validate Draft": {
+      "main": [
+        [{"node": "Send Resolution Reply", "type": "main", "index": 0}],
+        [{"node": "Respond Invalid Draft", "type": "main", "index": 0}]
+      ]
+    },
+    "Send Resolution Reply": {
+      "main": [
+        [{"node": "Handle Send Success", "type": "main", "index": 0}],
+        [{"node": "Handle Send Failure", "type": "main", "index": 0}]
+      ]
+    },
+    "Handle Send Success": { "main": [[{"node": "Update Request (Sent)", "type": "main", "index": 0}]] },
+    "Handle Send Failure": { "main": [[{"node": "Update Request (Failed)", "type": "main", "index": 0}]] },
+    "Update Request (Sent)": { "main": [[{"node": "Log Activity (Sent)", "type": "main", "index": 0}]] },
+    "Update Request (Failed)": { "main": [[{"node": "Log Activity (Failed)", "type": "main", "index": 0}]] },
+    "Log Activity (Sent)": { "main": [[{"node": "Respond Success", "type": "main", "index": 0}]] },
+    "Log Activity (Failed)": { "main": [[{"node": "Respond Failure", "type": "main", "index": 0}]] },
+    "Respond Success": { "main": [[{"node": "Return Webhook Response", "type": "main", "index": 0}]] },
+    "Respond Failure": { "main": [[{"node": "Send Ops Alert", "type": "main", "index": 0}]] },
+    "Send Ops Alert": { "main": [[{"node": "Return Webhook Response", "type": "main", "index": 0}]] },
+    "Respond Missing Request": { "main": [[{"node": "Return Webhook Response", "type": "main", "index": 0}]] },
+    "Respond Invalid Draft": { "main": [[{"node": "Return Webhook Response", "type": "main", "index": 0}]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "reply-to-resolved-request-v1",
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": []
+}
