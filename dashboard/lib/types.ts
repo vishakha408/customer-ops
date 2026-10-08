@@ -67,10 +67,6 @@ export interface SupportRequest {
   assigned_to: string | null;
   resolution_note: string | null;
   reply_sent: boolean;
-  reply_subject: string | null;
-  reply_draft: string | null;
-  reply_sent_at: string | null;
-  reply_sent_error: string | null;
   last_error: string | null;
   analyzed_at: string | null;
   resolved_at: string | null;

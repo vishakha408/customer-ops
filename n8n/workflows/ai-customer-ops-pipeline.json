@@ -3,17 +3,25 @@
   "nodes": [
     {
       "id": "00000000-0000-4000-8000-000000000001",
-      "name": "Email Trigger (IMAP)",
-      "type": "n8n-nodes-base.emailReadImap",
-      "typeVersion": 2.2,
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.1,
       "position": [
         0,
         340
       ],
       "parameters": {
-        "mailbox": "INBOX",
-        "postProcessAction": "read",
-        "format": "simple",
+        "pollTimes": {
+          "itemMode": "everyMinute"
+        },
+        "event": "messageReceived",
+        "simple": false,
+        "filters": {
+          "labelIds": [
+            "INBOX"
+          ],
+          "readStatus": "unread"
+        },
         "options": {}
       }
     },
