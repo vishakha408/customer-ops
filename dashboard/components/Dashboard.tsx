@@ -22,6 +22,29 @@ const PRIORITY_OPTIONS = ['all', 'urgent', 'high', 'medium', 'low'] as const;
 
 const EMPTY_FORM = { email: '', name: '', subject: '', body: '' };
 
+/** Fallback when /api/metrics is unavailable: counts from the loaded rows. */
+function computeSnapshotMetrics(rows: SupportRequest[]): DashboardMetrics {
+  const m: DashboardMetrics = {
+    total: rows.length, new: 0, analyzing: 0, pending_review: 0,
+    in_progress: 0, auto_handled: 0, resolved: 0, failed: 0,
+    urgent_open: 0, negative_sentiment_open: 0, avg_minutes_to_resolve: null,
+  };
+  let resolveSum = 0;
+  let resolveCount = 0;
+  for (const r of rows) {
+    if (r.status in m) (m[r.status as keyof DashboardMetrics] as number)++;
+    const open = ['new', 'analyzing', 'pending_review', 'in_progress'].includes(r.status);
+    if (open && r.priority === 'urgent') m.urgent_open++;
+    if (open && (r.sentiment === 'negative' || r.sentiment === 'angry')) m.negative_sentiment_open++;
+    if (r.resolved_at && r.created_at) {
+      resolveSum += (new Date(r.resolved_at).getTime() - new Date(r.created_at).getTime()) / 60000;
+      resolveCount++;
+    }
+  }
+  m.avg_minutes_to_resolve = resolveCount > 0 ? Math.round(resolveSum / resolveCount) : null;
+  return m;
+}
+
 export default function Dashboard({ initialRequestId }: { initialRequestId?: string }) {
   const [requests, setRequests] = useState<SupportRequest[]>([]);
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
@@ -42,32 +65,29 @@ export default function Dashboard({ initialRequestId }: { initialRequestId?: str
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/requests?limit=200', { cache: 'no-store' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      const rows: SupportRequest[] = data.requests ?? [];
+      // Metrics are server-wide (dashboard_metrics() RPC) so counts stay
+      // correct beyond the 200 rows the table loads.
+      const [requestsRes, metricsRes] = await Promise.all([
+        fetch('/api/requests?limit=200', { cache: 'no-store' }),
+        fetch('/api/metrics', { cache: 'no-store' }),
+      ]);
+
+      const requestsData = (await requestsRes.json().catch(() => ({}))) as {
+        requests?: SupportRequest[];
+        error?: string;
+      };
+      if (!requestsRes.ok) throw new Error(requestsData.error ?? `HTTP ${requestsRes.status}`);
+      const rows: SupportRequest[] = requestsData.requests ?? [];
       setRequests(rows);
 
-      // Compute metrics from the same snapshot so counts always match the table.
-      const m: DashboardMetrics = {
-        total: rows.length, new: 0, analyzing: 0, pending_review: 0,
-        in_progress: 0, auto_handled: 0, resolved: 0, failed: 0,
-        urgent_open: 0, negative_sentiment_open: 0, avg_minutes_to_resolve: null,
+      const metricsData = (await metricsRes.json().catch(() => ({}))) as {
+        metrics?: DashboardMetrics;
       };
-      let resolveSum = 0;
-      let resolveCount = 0;
-      for (const r of rows) {
-        if (r.status in m) (m[r.status as keyof DashboardMetrics] as number)++;
-        const open = ['new', 'analyzing', 'pending_review', 'in_progress'].includes(r.status);
-        if (open && r.priority === 'urgent') m.urgent_open++;
-        if (open && (r.sentiment === 'negative' || r.sentiment === 'angry')) m.negative_sentiment_open++;
-        if (r.resolved_at && r.created_at) {
-          resolveSum += (new Date(r.resolved_at).getTime() - new Date(r.created_at).getTime()) / 60000;
-          resolveCount++;
-        }
+      if (metricsRes.ok && metricsData.metrics) {
+        setMetrics(metricsData.metrics);
+      } else {
+        setMetrics(computeSnapshotMetrics(rows));
       }
-      m.avg_minutes_to_resolve = resolveCount > 0 ? Math.round(resolveSum / resolveCount) : null;
-      setMetrics(m);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
@@ -95,12 +115,19 @@ export default function Dashboard({ initialRequestId }: { initialRequestId?: str
   }, [notice]);
 
   const counts = useMemo(() => {
-    const map: Record<string, number> = { all: requests.length };
-    for (const request of requests) {
-      map[request.status] = (map[request.status] ?? 0) + 1;
+    const map: Record<string, number> = { all: metrics?.total ?? requests.length };
+    if (metrics) {
+      // Server-wide counts, so the chips stay correct past the 200 loaded rows.
+      for (const status of STATUS_FILTERS) {
+        if (status !== 'all') map[status] = metrics[status] ?? 0;
+      }
+    } else {
+      for (const request of requests) {
+        map[request.status] = (map[request.status] ?? 0) + 1;
+      }
     }
     return map;
-  }, [requests]);
+  }, [requests, metrics]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -169,8 +196,11 @@ export default function Dashboard({ initialRequestId }: { initialRequestId?: str
           <div>
             <h1>Request queue</h1>
             <p>
-              {requests.length} request{requests.length === 1 ? '' : 's'} total
-              {filtered.length !== requests.length ? ` · ${filtered.length} shown` : ''}
+              {metrics?.total ?? requests.length} request
+              {(metrics?.total ?? requests.length) === 1 ? '' : 's'} total
+              {filtered.length !== (metrics?.total ?? requests.length)
+                ? ` · ${filtered.length} shown`
+                : ''}
             </p>
           </div>
           <button className="btn btn-primary" onClick={() => setShowForm(true)}>

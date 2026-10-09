@@ -160,15 +160,52 @@ function stripHtml(html) {
     .trim();
 }
 
+// n8n's Gmail trigger/node can hand header fields back either as plain
+// strings or as nested objects ({ text } or { value: [{ name, address }] }).
+// Flatten any of those shapes to text so parsing never yields "[object Object]".
+function asText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') {
+    if (typeof value.text === 'string') return value.text;
+    if (typeof value.address === 'string') {
+      return value.name ? value.name + ' <' + value.address + '>' : value.address;
+    }
+    if (value.value !== undefined) {
+      const v = value.value;
+      if (typeof v === 'string') return v;
+      if (Array.isArray(v)) {
+        return v
+          .map((item) => {
+            if (item === null || item === undefined) return '';
+            if (typeof item === 'string') return item;
+            if (typeof item === 'object') {
+              if (typeof item.text === 'string') return item.text;
+              if (typeof item.address === 'string') {
+                return item.name ? item.name + ' <' + item.address + '>' : item.address;
+              }
+            }
+            return '';
+          })
+          .filter(Boolean)
+          .join(', ');
+      }
+    }
+  }
+  return String(value);
+}
+
 function splitAddress(raw) {
-  const angled = String(raw || '').match(/^(.*)<([^>]+)>/);
+  const text = asText(raw);
+  const angled = text.match(/^(.*)<([^>]+)>/);
   if (angled) {
     return {
       name: angled[1].trim().replace(/^"|"$/g, ''),
       email: angled[2].trim(),
     };
   }
-  const value = String(raw || '').trim();
+  const value = text.trim();
   return { name: value.split('@')[0], email: value };
 }
 
@@ -178,6 +215,7 @@ let subject = '';
 let body = '';
 let threadId = '';
 let messageId = '';
+let requestId = '';
 let source = 'webhook';
 
 if (first.payload && Array.isArray(first.payload.headers)) {
@@ -190,13 +228,13 @@ if (first.payload && Array.isArray(first.payload.headers)) {
   const from = splitAddress(headers.from);
   email = from.email;
   name = from.name;
-  subject = String(headers.subject || '(no subject)');
+  subject = String(asText(headers.subject) || '(no subject)');
   const chunks = [];
   collectBodies(first.payload, chunks);
   body = chunks.join('\n').trim();
-  if (!body && first.text) body = String(first.text).trim();
-  if (!body && first.html) body = stripHtml(first.html);
-  if (!body && first.snippet) body = String(first.snippet).trim();
+  if (!body && first.text) body = asText(first.text).trim();
+  if (!body && first.html) body = stripHtml(asText(first.html));
+  if (!body && first.snippet) body = asText(first.snippet).trim();
   threadId = String(first.threadId || '');
   messageId = String(first.id || '');
 } else if (first.from) {
@@ -205,14 +243,36 @@ if (first.payload && Array.isArray(first.payload.headers)) {
   const from = splitAddress(first.from);
   email = from.email;
   name = from.name;
-  subject = String(first.subject || '(no subject)');
-  if (first.text) body = String(first.text).trim();
-  else if (first.html) body = stripHtml(first.html);
-  else body = String(first.snippet || '').trim();
+  subject = String(asText(first.subject) || '(no subject)');
+  if (first.text) body = asText(first.text).trim();
+  else if (first.html) body = stripHtml(asText(first.html));
+  else body = asText(first.snippet).trim();
   threadId = String(first.threadId || '');
   messageId = String(first.id || '');
 } else {
   // ---- webhook / dashboard payload --------------------------------
+  // Shared-secret check for the dashboard -> n8n handoff. Validation is
+  // skipped when N8N_WEBHOOK_SECRET is not configured on the n8n instance.
+  let expectedSecret = '';
+  try {
+    expectedSecret = String($env.N8N_WEBHOOK_SECRET || '');
+  } catch (e) {
+    expectedSecret = '';
+  }
+  if (expectedSecret) {
+    const headers = first.headers || {};
+    let provided = '';
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'x-webhook-secret') {
+        provided = String(headers[key]);
+        break;
+      }
+    }
+    if (provided !== expectedSecret) {
+      throw new Error('Webhook intake rejected: missing or invalid x-webhook-secret');
+    }
+  }
+
   // n8n Webhook node wraps the POSTed JSON in .body; fall back to the
   // top level so flat payloads (curl, tests) keep working too.
   const p = (first.body && typeof first.body === 'object') ? first.body : first;
@@ -222,6 +282,9 @@ if (first.payload && Array.isArray(first.payload.headers)) {
   body = String(p.body || p.message || p.text || '');
   threadId = String(p.threadId || '');
   messageId = String(p.messageId || '');
+  // Requests already stored by the dashboard/webhook intake carry their row
+  // id so this workflow analyses THAT row instead of creating a duplicate.
+  requestId = String(p.requestId || p.request_id || '');
   if (!subject) {
     subject = '(no subject)';
     warnings.push('Subject was missing - a default was applied');
@@ -252,6 +315,7 @@ return [
       body,
       threadId,
       messageId,
+      requestId,
       source,
       receivedAt: new Date().toISOString(),
       intakeWarnings: warnings,
@@ -311,6 +375,7 @@ return [
       message_id: intake.messageId || null,
       customer_id: customer ? customer.id : null,
       status: 'analyzing',
+      requestId: intake.requestId || '',
       context: JSON.stringify(context, null, 2),
       customerKnown: Boolean(customer),
       intakeWarnings: intake.intakeWarnings || [],
@@ -338,14 +403,26 @@ return [
 
 const PARSE_ANALYSIS = String.raw`// Parses + validates the model output and applies deterministic guardrails.
 // The model never routes on its own: every safety rule below is plain code.
-const agentItem = $('AI Agent').first().json;
+// Read $input, not $('AI Agent'): on the success path the input is the AI
+// Agent output, and on the error path it is the "AI Failure Handler" output
+// (which carries the real aiError). Reading the node directly would discard
+// the error detail and always report the generic "unparseable output".
+const agentItem = $input.first().json;
 const intake = $('Normalize Request').first().json;
 const raw = typeof agentItem.output === 'string' ? agentItem.output.trim() : '';
 const warnings = intake.intakeWarnings || [];
 
 function parseJsonObject(text) {
   if (!text) return null;
-  const cleaned = text.replace(/^\`\`\`(?:json)?/i, '').replace(/\`\`\`$/i, '').trim();
+  const cleaned = text
+    .replace(/^\`\`\`(?:json)?/i, '')
+    .replace(/\`\`\`$/i, '')
+    // Models occasionally emit raw CR/LF inside JSON string values (illegal in
+    // JSON) or hard-wrap their output. Raw newlines are insignificant
+    // whitespace between tokens and invalid inside strings, so stripping them
+    // repairs the payload while preserving escaped \n sequences.
+    .replace(/[\r\n]+/g, '')
+    .trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start === -1 || end <= start) return null;
@@ -455,7 +532,10 @@ return [
 
 const HANDLE_SEND_FAILURE = String.raw`// The customer reply could not be delivered - record why so the request can
 // be retried by a human instead of silently disappearing.
-const requestId = $('Create Request').first().json.id;
+// Requests forwarded by the dashboard already have a row (requestId); the
+// Gmail path falls back to the row created by "Create Request".
+const requestId =
+  $('Prepare Context').first().json.requestId || $('Create Request').first().json.id;
 const err = $input.first().json || {};
 const detail =
   (err.error && err.error.message) ||
@@ -590,10 +670,23 @@ const nodes = [
 
   code('Prepare Context', PREPARE_CONTEXT, [1120, 420]),
 
+  // Requests forwarded by the dashboard/webhook intake were already stored
+  // by POST /api/requests or /api/webhook/intake. Updating that row (instead
+  // of inserting a new one) keeps one request per customer message.
+  ifNode('Existing Request?', '={{ !!$json.requestId }}', [1240, 420]),
+  supabaseNode('Update Existing Request', 'update', 'requests', [1460, 200], {
+    fields: [['status', 'analyzing']],
+    filter: { key: 'id', value: '={{ $json.requestId }}' },
+    onError: 'continueErrorOutput',
+    alwaysOutputData: true,
+  }),
+
   supabaseNode('Create Request', 'create', 'requests', [1340, 420], {
     extraParams: {
       dataToSend: 'autoMapInputData',
-      inputsToIgnore: 'context,customerKnown,intakeWarnings',
+      // requestId is workflow-internal (used to route to Update Existing
+      // Request) and has no matching column on the requests table.
+      inputsToIgnore: 'context,customerKnown,intakeWarnings,requestId',
     },
     onError: 'continueErrorOutput',
   }),
@@ -605,7 +698,7 @@ const nodes = [
       [
         'message',
         'string',
-        "='The intake step failed, so this request is NOT stored in Supabase and needs manual handling.\\n\\nSender: ' + $('Normalize Request').first().json.email + '\\nSubject: ' + $('Normalize Request').first().json.subject + '\\n\\nError: ' + JSON.stringify($json).slice(0, 500)",
+        "={{ 'The intake step failed, so this request could not be stored in Supabase and needs manual handling.\\n\\nSender: ' + $('Normalize Request').first().json.email + '\\nSubject: ' + $('Normalize Request').first().json.subject + '\\n\\nError: ' + JSON.stringify($json).slice(0, 500) }}",
       ],
     ],
     [1560, 640],
@@ -659,7 +752,9 @@ const nodes = [
     position: [2000, 340],
     parameters: {
       promptType: 'define',
-      text: '={{ $json.context }}',
+      // Reference Prepare Context explicitly: the item arriving here has
+      // passed through "Mark Email Read", whose Gmail output replaces $json.
+      text: "={{ $('Prepare Context').first().json.context }}",
       options: { systemMessage: SYSTEM_MESSAGE },
     },
     onError: 'continueErrorOutput',
@@ -689,7 +784,10 @@ const nodes = [
 
   supabaseNode('Log Analysis', 'create', 'request_activities', [2660, 340], {
     fields: [
-      ['request_id', '={{ $("Create Request").first().json.id }}'],
+      [
+        'request_id',
+        "={{ $('Prepare Context').first().json.requestId || $('Create Request').first().json.id }}",
+      ],
       ['type', 'analysis'],
       ['actor', 'agent'],
       [
@@ -699,7 +797,10 @@ const nodes = [
     ],
   }),
 
-  ifNode('Requires Human?', '={{ $json.needsHuman }}', [2880, 340]),
+  // The left value must read Parse Analysis explicitly: the preceding
+  // "Log Analysis" Supabase node outputs the inserted activity row, so
+  // $json.needsHuman would always be undefined here.
+  ifNode('Requires Human?', "={{ $('Parse Analysis').first().json.needsHuman }}", [2880, 340]),
 
   setNode(
     'Build Review Alert',
@@ -713,7 +814,7 @@ const nodes = [
       [
         'message',
         'string',
-        "='A customer request requires human review.\\n\\nFrom: ' + $('Normalize Request').first().json.name + ' <' + $('Normalize Request').first().json.email + '>\\nSubject: ' + $('Normalize Request').first().json.subject + '\\nPriority: ' + $('Parse Analysis').first().json.priority + '\\nSentiment: ' + $('Parse Analysis').first().json.sentiment + '\\nDecision: ' + $('Parse Analysis').first().json.decision + '\\nConfidence: ' + $('Parse Analysis').first().json.confidence + '\\n\\nSummary: ' + $('Parse Analysis').first().json.summary + '\\nRecommended action: ' + $('Parse Analysis').first().json.recommended_action + ($('Parse Analysis').first().json.aiError ? '\\n\\nAI analysis error: ' + $('Parse Analysis').first().json.aiError : '') + '\\n\\nOriginal message:\\n' + $('Normalize Request').first().json.body + '\\n\\nDashboard: http://localhost:3000/requests/' + $('Create Request').first().json.id",
+        "={{ 'A customer request requires human review.\\n\\nFrom: ' + $('Normalize Request').first().json.name + ' <' + $('Normalize Request').first().json.email + '>\\nSubject: ' + $('Normalize Request').first().json.subject + '\\nPriority: ' + $('Parse Analysis').first().json.priority + '\\nSentiment: ' + $('Parse Analysis').first().json.sentiment + '\\nDecision: ' + $('Parse Analysis').first().json.decision + '\\nConfidence: ' + $('Parse Analysis').first().json.confidence + '\\n\\nSummary: ' + $('Parse Analysis').first().json.summary + '\\nRecommended action: ' + $('Parse Analysis').first().json.recommended_action + ($('Parse Analysis').first().json.aiError ? '\\n\\nAI analysis error: ' + $('Parse Analysis').first().json.aiError : '') + ($('Parse Analysis').first().json.analysisFailed && $('Parse Analysis').first().json.rawAnalysis && $('Parse Analysis').first().json.rawAnalysis.raw ? '\\n\\nRaw model output (for debugging):\\n' + $('Parse Analysis').first().json.rawAnalysis.raw.slice(0, 1000) : '') + '\\n\\nOriginal message:\\n' + $('Normalize Request').first().json.body + '\\n\\nDashboard: http://localhost:3002/requests/' + ($('Prepare Context').first().json.requestId || $('Create Request').first().json.id) }}",
       ],
     ],
     [3100, 220],
@@ -724,7 +825,7 @@ const nodes = [
   setNode(
     'Set Status Pending Review',
     [
-      ['id', 'string', '={{ $("Create Request").first().json.id }}'],
+      ['id', 'string', "={{ $('Prepare Context').first().json.requestId || $('Create Request').first().json.id }}"],
       ['status', 'string', 'pending_review'],
       ['decision', 'string', '={{ $("Parse Analysis").first().json.decision }}'],
       ['intent', 'string', '={{ $("Parse Analysis").first().json.intent }}'],
@@ -764,7 +865,7 @@ const nodes = [
   setNode(
     'Set Status Auto Resolved',
     [
-      ['id', 'string', '={{ $("Create Request").first().json.id }}'],
+      ['id', 'string', "={{ $('Prepare Context').first().json.requestId || $('Create Request').first().json.id }}"],
       ['status', 'string', 'auto_handled'],
       ['decision', 'string', '={{ $("Parse Analysis").first().json.decision }}'],
       ['intent', 'string', '={{ $("Parse Analysis").first().json.intent }}'],
@@ -851,7 +952,11 @@ const edges = [
   link('Customer Found?', 'Prepare Context', 0),
   link('Customer Found?', 'Create Customer', 1),
   link('Create Customer', 'Prepare Context'),
-  link('Prepare Context', 'Create Request'),
+  link('Prepare Context', 'Existing Request?'),
+  link('Existing Request?', 'Update Existing Request', 0),
+  link('Existing Request?', 'Create Request', 1),
+  link('Update Existing Request', 'Mark Email Read', 0),
+  link('Update Existing Request', 'Intake Failure Alert', 1),
   link('Create Request', 'Intake Failure Alert', 1),
   link('Intake Failure Alert', 'Send Intake Failure Alert'),
   link('Create Request', 'Log Request Created', 0),

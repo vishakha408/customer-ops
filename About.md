@@ -9,7 +9,7 @@ Three cooperating layers, connected by Supabase as the single source of truth:
 
 | Layer | Technology | Responsibility |
 | --- | --- | --- |
-| Orchestration | **n8n** (`AI Customer Operations Pipeline`, 24 nodes) | Intake, customer lookup, prompt assembly, AI call, routing, email, status writes |
+| Orchestration | **n8n** (`AI Customer Operations Pipeline`, 31 nodes) | Intake, customer lookup, prompt assembly, AI call, routing, email, status writes |
 | Intelligence | **Claude (Anthropic)** via the n8n *AI Agent* node (`claude-sonnet-4-5-20250929`) | intent, category, priority, sentiment, summary, recommended action, decision, draft reply |
 | Data | **Supabase (Postgres)** | `customers`, `requests`, `request_activities`, triggers, `dashboard_metrics()` RPC |
 | Communication | **Gmail (OAuth2)** | customer replies, internal review alerts, failure alerts, "mark as read" |
@@ -21,13 +21,15 @@ Three cooperating layers, connected by Supabase as the single source of truth:
 | --- | --- | --- | --- |
 | 1 | `Gmail Trigger` | Gmail Trigger | Polls the support inbox every minute for `INBOX` + `unread` messages (Simplify = off, so raw MIME is available) |
 | 1 | `Webhook Intake` | Webhook | `POST /webhook/customer-ops-intake` — the programmatic entry point used by the dashboard and external systems (`responseMode: onReceived`) |
-| 2 | `Normalize Request` | Code | Converts either entry point into one canonical shape `{email, name, subject, body, threadId, messageId, source, intakeWarnings[]}` — base64url decoding of Gmail MIME parts, HTML stripping, `Name <addr>` parsing, default subject, 8 000-char body cap, sender validation |
+| 2 | `Normalize Request` | Code | Converts either entry point into one canonical shape `{email, name, subject, body, threadId, messageId, requestId, source, intakeWarnings[]}` — base64url decoding of Gmail MIME parts, HTML stripping, `Name <addr>` parsing, default subject, 8 000-char body cap, sender validation. Also rejects webhook calls whose `x-webhook-secret` header does not match `N8N_WEBHOOK_SECRET` (when configured) |
 | 3 | `Find Customer` | Supabase | `select * from customers where email = ? limit 1` (`alwaysOutputData` so a miss doesn't break the branch) |
 | 4 | `Customer Found?` | IF | `true → Prepare Context`, `false → Create Customer` (new senders get a stub CRM record) |
 | 5 | `Create Customer` | Supabase | Inserts `email` + `full_name`; `onError: continueRegularOutput` so a race (duplicate email) degrades to `customer: null` instead of failing |
 | 6 | `Prepare Context` | Code | Builds the AI prompt payload (see §1.4) and the column-aligned row for the `requests` insert |
-| 7 | `Create Request` | Supabase | Inserts the request with `status = 'analyzing'`; `onError: continueErrorOutput` → failure branch |
-| 7b | `Intake Failure Alert` → `Send Intake Failure Alert` | Set + Gmail | Error branch: ops email containing the sender, subject and the raw error — nothing disappears silently |
+| 7 | `Existing Request?` | IF | `true` (dashboard/webhook payload carries the `requestId` stamped by the intake API) → `Update Existing Request`; `false` (Gmail) → `Create Request` |
+| 7a | `Create Request` | Supabase | Inserts the request with `status = 'analyzing'`; `onError: continueErrorOutput` → failure branch |
+| 7b | `Update Existing Request` | Supabase | Updates the row already stored by the intake API to `status = 'analyzing'` — prevents duplicate request rows for forwarded requests |
+| 7c | `Intake Failure Alert` → `Send Intake Failure Alert` | Set + Gmail | Error branch: ops email containing the sender, subject and the raw error — nothing disappears silently |
 | 8 | `Log Request Created` | Supabase | Timeline row `type=intake, actor=n8n` |
 | 9 | `Mark Email Read` | Gmail | `markAsRead` on the processed message so the poller never picks it up twice (`continue on fail`, so webhook runs skip it gracefully) |
 | 10 | `AI Agent` | LangChain Agent | The Claude call — prompt = the `context` JSON, system message = the analysis contract. `retryOnFail`, `maxTries: 3`, `waitBetweenTries: 5000`, `onError: continueErrorOutput` |
@@ -35,7 +37,7 @@ Three cooperating layers, connected by Supabase as the single source of truth:
 | 11 | `AI Failure Handler` | Code | Normalises the error output to `{output:'', aiError:'…'}` so `Parse Analysis` sees the same shape whether the model succeeded or failed |
 | 12 | `Parse Analysis` | Code | JSON extraction, allow-list validation, and **all** safety guardrails (§2) |
 | 13 | `Log Analysis` | Supabase | Timeline row `type=analysis, actor=agent` with intent/category/priority/sentiment/decision/confidence |
-| 14 | `Requires Human?` | IF | `false (needsHuman = false)` → auto-reply branch; `true` → review-alert branch |
+| 14 | `Requires Human?` | IF | Reads `needsHuman` from `Parse Analysis` explicitly (the preceding `Log Analysis` outputs the inserted activity row). `false` → auto-reply branch; `true` → review-alert branch |
 | 15 | `Build Review Alert` → `Send Review Alert` | Set + Gmail | Ops email: priority-prefixed subject, full analysis, original message, deep link `/requests/<id>` |
 | 15b | `Alert Delivery Failed` | Code | Alert email error is logged but the request **still** becomes `pending_review` |
 | 16 | `Build Customer Reply` → `Send Customer Reply` | Set + Gmail | `Re: <subject>` to the customer with the model's `reply.body` (guarded fallback text if empty) |
@@ -48,12 +50,14 @@ Three cooperating layers, connected by Supabase as the single source of truth:
 
 ```
 email/webhook payload
-   → Normalize Request        (canonical fields + intakeWarnings[])
+   → Normalize Request        (canonical fields + intakeWarnings[] + requestId)
    → Find/Create Customer     (CRM context)
    → Prepare Context          (prompt JSON  +  DB row)
-   → Create Request           status: 'analyzing'
-   → Log Request Created      request_activities (intake, n8n)
-   → Mark Email Read          (dedupe)
+   → Existing Request?        requestId present? (dashboard/webhook: yes)
+        no  → Create Request        status: 'analyzing'
+            → Log Request Created   request_activities (intake, n8n)
+        yes → Update Existing Request   status: 'analyzing' (row already stored)
+   → Mark Email Read          (dedupe; no-op for webhook rows)
    → AI Agent (Claude)        raw JSON proposal
    → Parse Analysis           validated fields + guardrails → decision
    → Log Analysis             request_activities (analysis, agent)
@@ -73,8 +77,9 @@ workflow — so the timeline can never go stale.
 
 **Configuration** (`AI Agent`, `@n8n/n8n-nodes-langchain.agent` v1.6):
 
-- `promptType: define`, `text: ={{ $json.context }}` — the user turn is exactly the JSON
-  built by `Prepare Context`.
+- `promptType: define`, `text: ={{ $('Prepare Context').first().json.context }}` — the user
+  turn is exactly the JSON built by `Prepare Context` (referenced explicitly because the item
+  passes through `Mark Email Read`, whose Gmail output would replace `$json`).
 - `options.systemMessage` = the analysis contract (below).
 - Model: **Claude Sonnet 4.5** (`claude-sonnet-4-5-20250929`) through the `Anthropic Claude`
   LM node.
@@ -125,7 +130,7 @@ workflow — so the timeline can never go stale.
 > `auto_resolve`, still fill `reply.body` with what a human agent should send.
 
 **Integrations used by the workflow:** Gmail OAuth2 (trigger, mark-as-read, customer reply,
-ops alert, failure alert), Supabase service-role (7 nodes: customers / requests /
+ops alert, failure alert), Supabase service-role (8 nodes: customers / requests /
 request_activities read-write), Anthropic API (Claude), plus the Next.js API
 (`POST /api/requests`, `POST /api/webhook/intake`) feeding the same webhook.
 
@@ -134,9 +139,11 @@ request_activities read-write), Anthropic API (Claude), plus the Next.js API
 Request: `Refund for invoice 1042 — "we were charged twice"` from a known enterprise customer.
 
 1. **Intake** — Gmail Trigger fires (or the dashboard form posts to `/api/requests`, which
-   stores the row and forwards to the webhook). `Normalize Request` produces the canonical
-   record; `Find Customer` returns the enterprise CRM record; `Create Request` inserts the
-   row as **`analyzing`** and the `intake` timeline entry is written.
+   stores the row and forwards it to the webhook with its `requestId`). `Normalize Request`
+   produces the canonical record; `Find Customer` returns the enterprise CRM record. Gmail
+   requests take `Create Request` (insert), forwarded requests take `Update Existing Request`
+   (same row → `analyzing`); the `intake` timeline entry is written for Gmail rows (the
+   dashboard already logged one at intake).
 2. **AI analysis** — Claude receives the context + system contract and returns:
    `intent: refund_request, category: billing, priority: high, sentiment: negative,
    decision: human_review, confidence: 0.93`, a 2-sentence summary, a recommended action
@@ -222,14 +229,16 @@ reply text or garbage output all route the request to a person.
 | `GET /api/requests?status=&priority=&q=&limit=` | request queue rows (+ customer join) |
 | `GET /api/metrics` | header metric cards (`dashboard_metrics()` RPC, with a plain-count fallback) |
 | `GET /api/requests/:id` | detail drawer: full record + activity timeline |
-| `PATCH /api/requests/:id` | human intervention (status, assignee, resolution note) |
-| `POST /api/requests` / `POST /api/webhook/intake` | intake form and external webhook |
+| `PATCH /api/requests/:id` | human intervention (status, assignee, resolution note; optional `x-admin-token`) |
+| `POST /api/requests` / `POST /api/webhook/intake` | intake form and external webhook (optional `x-admin-token` / `x-webhook-secret`) |
 | `GET /` and `/requests/[id]` | pages, shareable deep links used in ops alert emails |
 
-`Dashboard.tsx` fetches the queue once and derives the metric cards **from the same
-snapshot**, so card counts and table counts always agree, and re-fetches every **15 s**
-("Live · refreshing every 15 s" in the top bar), which is how n8n's status writes appear
-without manual reloads.
+`Dashboard.tsx` fetches the queue from `/api/requests` and the header aggregates from
+`/api/metrics` (server-wide, backed by the `dashboard_metrics()` RPC) in parallel, so card
+and chip counts stay correct even when the table caps at the 200 most recent rows. If
+`/api/metrics` is unavailable the cards fall back to counts derived from the loaded rows.
+The queue re-fetches every **15 s** ("Live · refreshing every 15 s" in the top bar), which is
+how n8n's status writes appear without manual reloads.
 
 ### 3.2 What is reflected where
 
@@ -249,12 +258,14 @@ without manual reloads.
   `failed` shows the red banner with `last_error`.
 - **Activity** — the drawer's *Activity timeline* merges both writers: `intake` and
   `analysis` (actor `n8n` / `agent`), `auto_resolution` / `review_requested` / `error`
-  (actor `n8n`), and the trigger-generated `status_change` entries (`system` / `human`),
-  each with timestamp, actor and type.
+  (actor `n8n`), and the trigger-generated `status_change` entries (`n8n` for workflow
+  statuses, `human` for dashboard actions, `system` otherwise), each with timestamp, actor
+  and type.
 - **Human intervention** — *Take ownership* (from `new / analyzing / pending_review /
   failed`), *Mark resolved* (from `in_progress`), *Reopen* (from `resolved / auto_handled`),
-  and an optional resolution note; `PATCH` validates status/decision against allow-lists and
-  sets `assigned_to`/`resolved_at` automatically.
+  and an optional resolution note; `PATCH` validates status/decision against allow-lists,
+  sets `assigned_to`/`resolved_at` automatically, and clears `resolved_at` when a request is
+  reopened.
 
 ### 3.3 Demo sequence
 
@@ -308,10 +319,11 @@ defaults first.
 | **Unknown sender (no CRM record)** | `Create Customer` creates a stub; if it races/duplicates (`continueRegularOutput`) the pipeline continues with `customer: null` → never auto-resolved |
 | **Customer reply email fails to send** | `Send Customer Reply` error output → `Handle Send Failure` → status `failed` with `last_error` + `error` timeline entry; the drawer shows a red banner with the exact error; *Take ownership* recovers it |
 | **Ops review alert fails to send** | `Alert Delivery Failed` logs the error but the request **still** becomes `pending_review` — a notification failure never blocks the queue |
-| **Request row cannot be created** | `Create Request` error output → `Intake Failure Alert` → ops email with sender, subject and raw error (≤500 chars): nothing is silently dropped |
+| **Request row cannot be created/updated** | `Create Request` / `Update Existing Request` error output → `Intake Failure Alert` → ops email with sender, subject and raw error (≤500 chars): nothing is silently dropped |
 | **n8n is down / unreachable** | Dashboard & webhook intake write to Supabase **first**, then best-effort forward to n8n (5 s timeout). Response `202 {forwarded: false, warning}`; the request waits as `new` for the next Gmail poll or a webhook replay — no data loss |
 | **Duplicate email processing** | `Mark Email Read` right after record creation + `email` unique upsert in dashboard intake |
-| **Malformed external payload** | `POST /api/webhook/intake` returns `400` for bad JSON, `401` for a wrong `x-webhook-secret`, `422` for missing/invalid `email` or empty `body` |
+| **Duplicate request rows** | Forwarded payloads carry `requestId`, so n8n updates the row stored by the intake API instead of inserting a second one |
+| **Malformed external payload** | `POST /api/webhook/intake` returns `400` for bad JSON, `401` for a wrong `x-webhook-secret`, `422` for missing/invalid `email` or empty `body`. The n8n `Webhook Intake` node independently rejects a mismatched secret when `N8N_WEBHOOK_SECRET` is set |
 | **Invalid human PATCH** | `PATCH /api/requests/:id` rejects unknown status/decision values (`422`) and empty updates (`400`) |
 | **Dashboard without DB migrations** | `/api/metrics` falls back from the RPC to a plain count query instead of 500ing |
 | **Status changed outside the workflow** | Postgres trigger `log_status_change()` writes a `status_change` timeline entry for *any* status update, so the audit trail stays complete |

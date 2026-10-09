@@ -109,7 +109,8 @@ create trigger requests_updated_at
 
 -- ---------------------------------------------------------------------------
 -- Activity helper: any status change automatically gets a timeline entry,
--- even if a caller forgets to insert one.
+-- even if a caller forgets to insert one. The n8n workflow adds a second,
+-- semantic entry on top of this one (see docs/architecture.md).
 -- ---------------------------------------------------------------------------
 create or replace function public.log_status_change()
 returns trigger
@@ -120,11 +121,24 @@ begin
     insert into public.request_activities (request_id, type, actor, message, metadata)
     values (
       new.id,
-      'status_change',
+      case when new.status = 'failed' then 'error'
+           when new.status = 'auto_handled' then 'auto_resolution'
+           else 'status_change' end,
+      -- Humans own requests via the dashboard (assigned_to is set);
+      -- analyzing/pending_review/auto_handled/failed are written by n8n.
       case when new.assigned_to is not null and new.assigned_to <> ''
-           then 'human' else 'system' end,
-      format('Status changed from %s to %s', old.status, new.status),
-      jsonb_build_object('from', old.status, 'to', new.status)
+                and new.status in ('in_progress', 'resolved')
+           then 'human'
+           when new.status in ('analyzing', 'pending_review', 'auto_handled', 'failed')
+           then 'n8n'
+           else 'system' end,
+      format('Status changed from %s to %s%s',
+             old.status,
+             new.status,
+             case when new.status = 'failed' and new.last_error is not null
+                  then ' - ' || new.last_error
+                  else '' end),
+      jsonb_build_object('from', old.status, 'to', new.status, 'decision', new.decision)
     );
   end if;
   return new;
@@ -142,13 +156,28 @@ returns trigger
 language plpgsql
 as $$
 begin
-  update public.customers c
-     set open_requests = (
-       select count(*) from public.requests r
-        where r.customer_id = c.id
-          and r.status in ('new', 'analyzing', 'pending_review', 'in_progress')
-     )
-  where c.id = coalesce(new.customer_id, old.customer_id);
+  -- On UPDATE the request may move between customers: refresh both sides.
+  if tg_op = 'UPDATE'
+     and new.customer_id is distinct from old.customer_id
+     and old.customer_id is not null then
+    update public.customers c
+       set open_requests = (
+         select count(*) from public.requests r
+          where r.customer_id = c.id
+            and r.status in ('new', 'analyzing', 'pending_review', 'in_progress')
+       )
+    where c.id = old.customer_id;
+  end if;
+
+  if coalesce(new.customer_id, old.customer_id) is not null then
+    update public.customers c
+       set open_requests = (
+         select count(*) from public.requests r
+          where r.customer_id = c.id
+            and r.status in ('new', 'analyzing', 'pending_review', 'in_progress')
+       )
+    where c.id = coalesce(new.customer_id, old.customer_id);
+  end if;
   return coalesce(new, old);
 end;
 $$;

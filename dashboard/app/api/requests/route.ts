@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import { REQUEST_STATUSES, PRIORITIES } from '@/lib/types';
 import { processIntake } from '@/lib/intake';
+import { writeAuthorized } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -64,6 +65,10 @@ export async function GET(req: NextRequest) {
  * with source = "dashboard".
  */
 export async function POST(req: NextRequest) {
+  if (!writeAuthorized(req)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   let body: Record<string, unknown>;
   try {
     body = await req.json();

@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import { DECISIONS, REQUEST_STATUSES, type RequestStatus } from '@/lib/types';
+import { writeAuthorized } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 type Ctx = { params: { id: string } };
+
+const OPEN_STATUSES = ['new', 'analyzing', 'pending_review', 'in_progress'];
 
 /** GET /api/requests/:id - full request record + activity timeline. */
 export async function GET(_req: NextRequest, { params }: Ctx) {
@@ -47,6 +50,10 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
  * The DB trigger writes the matching timeline entry automatically.
  */
 export async function PATCH(req: NextRequest, { params }: Ctx) {
+  if (!writeAuthorized(req)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -94,6 +101,10 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   }
   if (update.status === 'resolved' || update.status === 'auto_handled') {
     update.resolved_at = new Date().toISOString();
+  } else if (typeof update.status === 'string' && OPEN_STATUSES.includes(update.status)) {
+    // Reopened: clear the stale timestamp so avg. resolution metrics only
+    // reflect requests that are actually closed.
+    update.resolved_at = null;
   }
 
   try {

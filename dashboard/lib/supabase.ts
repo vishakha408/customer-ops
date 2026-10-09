@@ -3,7 +3,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 /**
  * Server-side Supabase client using the service-role key.
  * The dashboard API routes and the n8n workflow are the only writers;
- * the anon key (RLS: read-only) is exposed to the browser if needed.
+ * reads stay behind these routes (RLS: anon = read-only).
  */
 let client: SupabaseClient | null = null;
 

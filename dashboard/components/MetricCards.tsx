@@ -78,8 +78,8 @@ export default function MetricCards({
             <div className="sk sk-value" />
           ) : (
             <div className="metric-value">
-              {card.value ?? 0}
-              {card.suffix ?? ''}
+              {card.value ?? '—'}
+              {card.value == null ? '' : card.suffix ?? ''}
             </div>
           )}
           <div className="metric-hint">{card.hint}</div>

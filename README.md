@@ -49,13 +49,18 @@ OpenCode · Git**.
 3. Optionally run `supabase/seed.sql` for demo data.
 4. Copy **Project URL** and **service role key** (Settings → API).
 
+> Re-run `schema.sql` after pulling changes — the trigger functions
+> (`log_status_change`, `refresh_open_requests`) were updated and are safe to
+> re-apply.
+
 ### 2. n8n (10 min)
 
 1. Import `n8n/workflows/ai-customer-ops-pipeline.json`.
 2. Attach three credentials: **Gmail OAuth2**, **Supabase**, **Anthropic API** —
    details in [`n8n/README.md`](n8n/README.md).
-3. Replace the two literal `customer-ops@yourcompany.com` addresses and the dashboard URL
-   in the `Build Review Alert` / `Intake Failure Alert` nodes.
+3. Replace the two literal `customer-ops@yourcompany.com` addresses with a real
+   ops inbox, and update the dashboard URL inside `Build Review Alert` if the
+   dashboard is not on `http://localhost:3002`.
 4. Activate the workflow.
 
 ### 3. Dashboard (2 min)
@@ -66,6 +71,10 @@ npm install
 cp .env.example .env.local      # fill in SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
 npm run dev                     # http://localhost:3000
 ```
+
+Set `DASHBOARD_API_TOKEN` before exposing the dashboard beyond localhost: the
+write endpoints (`POST /api/requests`, `PATCH /api/requests/:id`) then require
+the `x-admin-token` header. Reads stay open (matching the demo RLS policy).
 
 ### 4. End-to-end test
 
@@ -105,8 +114,12 @@ The model *proposes* `auto_resolve | human_review | escalate`; code decides:
 
 - AI agent: 3 retries → fallback analysis → human review (never a dropped request).
 - Reply email failure: request marked `failed` with `last_error`, visible on the dashboard.
-- Supabase insert failure: alert email with the raw error — nothing disappears silently.
+- Supabase insert/update failure: alert email with the raw error — nothing disappears silently.
 - n8n down: intake still stores requests as `new` for later processing.
+- Duplicate rows: forwarded requests carry their row id, so n8n updates that row instead of
+  inserting a second one.
+- Webhook security: optional shared secret (`x-webhook-secret`) checked by both the Next.js
+  route and the n8n webhook node.
 
 Full table in [`docs/architecture.md`](docs/architecture.md).
 

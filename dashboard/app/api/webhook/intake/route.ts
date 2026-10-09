@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { processIntake } from '@/lib/intake';
+import { secretMatches } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,7 +18,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   const secret = process.env.N8N_WEBHOOK_SECRET;
   const provided = req.headers.get('x-webhook-secret');
-  if (secret && provided !== secret) {
+  if (secret && !secretMatches(provided, secret)) {
     return NextResponse.json({ error: 'Invalid webhook secret' }, { status: 401 });
   }
 

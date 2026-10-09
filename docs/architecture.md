@@ -14,10 +14,10 @@
 ```mermaid
 stateDiagram-v2
     [*] --> new: intake (email / webhook / dashboard)
-    new --> analyzing: request row created, n8n starts
+    new --> analyzing: n8n analyses the row (created for Gmail, updated in place for webhook/dashboard)
     analyzing --> auto_handled: auto_resolve + reply sent
     analyzing --> pending_review: human_review / escalate (ops alerted)
-    analyzing --> failed: request row could not be created
+    analyzing --> failed: request row could not be created/updated
     pending_review --> in_progress: operator takes ownership
     in_progress --> resolved: operator marks resolved
     in_progress --> pending_review: re-queued
@@ -32,6 +32,9 @@ Every status change writes a `request_activities` row — twice, deliberately:
    covers manual edits made outside the workflow, and
 2. a **semantic** entry from n8n (`intake`, `analysis`, `auto_resolution`,
    `review_requested`, `error`) describing what happened and why.
+
+The trigger attributes `actor` from the change itself (`n8n` for workflow-written statuses,
+`human` when an operator owns the request, `system` otherwise).
 
 ## Data model
 
@@ -80,11 +83,14 @@ alerts `OPS_TEAM_EMAIL` with the full analysis and a deep link to
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/requests?status=&priority=&q=&limit=` | List requests (+ customer join) |
-| `POST /api/requests` | Dashboard intake form → stores + forwards to n8n |
+| `POST /api/requests` | Dashboard intake form → stores + forwards to n8n (optional `x-admin-token`) |
 | `GET /api/requests/:id` | Request + activity timeline |
-| `PATCH /api/requests/:id` | Human intervention: status, assignee, resolution note |
+| `PATCH /api/requests/:id` | Human intervention: status, assignee, resolution note (optional `x-admin-token`) |
 | `GET /api/metrics` | Header card aggregates (`dashboard_metrics()` RPC) |
 | `POST /api/webhook/intake` | External/webhook intake (optional `x-webhook-secret`) |
+
+When `DASHBOARD_API_TOKEN` is set, both write endpoints require the matching
+`x-admin-token` header; reads remain open to match the demo RLS policy.
 
 ## Failure modes and mitigations
 
@@ -94,19 +100,22 @@ alerts `OPS_TEAM_EMAIL` with the full analysis and a deep link to
 | Empty subject or body | Default subject applied, warning recorded, routed to human |
 | AI model timeout/error | 3 retries, then error output → fallback analysis → human review |
 | Model returns non-JSON / missing fields | Allow-list validation with defaults, guardrails, human review |
-| Supabase request insert fails | Ops alert email with raw error — nothing is silently dropped |
+| Supabase request insert/update fails | Ops alert email with raw error — nothing is silently dropped |
 | Customer reply undeliverable | Status `failed` + `last_error` on the request; visible on the dashboard |
 | Ops alert undeliverable | Request still queued as `pending_review`; failure in execution log |
 | n8n instance down | Dashboard/webhook intake still stores the request as `new`; no data loss |
 | n8n unreachable from intake | 202 response with `forwarded: false` + warning; request stays queued |
 | Duplicate email processing | Processed mails are marked read after record creation; `email` unique upsert |
+| Dashboard/webhook request reaches n8n | The payload carries `requestId`, so n8n updates that row to `analyzing` instead of inserting a duplicate |
 | Dashboard without DB migrations | `/api/metrics` falls back to a plain count query |
 
 ## Security notes
 
 - Service-role key only ever used server-side (API routes) or inside n8n credentials.
 - RLS: anon = read-only; no anon write policies exist.
-- Webhook intake can require `x-webhook-secret` (`N8N_WEBHOOK_SECRET`).
+- Webhook intake can require `x-webhook-secret` (`N8N_WEBHOOK_SECRET`): enforced on the
+  Next.js route (constant-time compare) and on the n8n `Webhook Intake` node.
+- `DASHBOARD_API_TOKEN` optionally protects the write endpoints with `x-admin-token`.
 - PostgREST `or=` search input is sanitised against filter injection.
 - Outbound email is restricted to the customer (reply) and the ops inbox (alerts); the
   model never chooses recipients — addresses come from the intake data and literals.

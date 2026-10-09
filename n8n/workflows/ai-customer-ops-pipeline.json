@@ -52,7 +52,7 @@
         420
       ],
       "parameters": {
-        "jsCode": "// Normalises the two entry points into a single request shape:\n//   1. Gmail Trigger  (raw Gmail message, Simplify = false)\n//   2. Webhook Intake (JSON body from the dashboard / external system)\nconst first = $input.first().json;\nconst warnings = [];\n\nfunction decodeBase64Url(data) {\n  try {\n    return Buffer.from(data, 'base64url').toString('utf8');\n  } catch (e) {\n    return '';\n  }\n}\n\nfunction collectBodies(payload, out) {\n  if (!payload) return;\n  if (payload.body && payload.body.data) out.push(decodeBase64Url(payload.body.data));\n  (payload.parts || []).forEach((part) => collectBodies(part, out));\n}\n\nfunction stripHtml(html) {\n  return String(html)\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction splitAddress(raw) {\n  const angled = String(raw || '').match(/^(.*)<([^>]+)>/);\n  if (angled) {\n    return {\n      name: angled[1].trim().replace(/^\"|\"$/g, ''),\n      email: angled[2].trim(),\n    };\n  }\n  const value = String(raw || '').trim();\n  return { name: value.split('@')[0], email: value };\n}\n\nlet email = '';\nlet name = '';\nlet subject = '';\nlet body = '';\nlet threadId = '';\nlet messageId = '';\nlet source = 'webhook';\n\nif (first.payload && Array.isArray(first.payload.headers)) {\n  // ---- raw Gmail message ------------------------------------------\n  source = 'email';\n  const headers = {};\n  first.payload.headers.forEach((h) => {\n    headers[String(h.name).toLowerCase()] = h.value;\n  });\n  const from = splitAddress(headers.from);\n  email = from.email;\n  name = from.name;\n  subject = String(headers.subject || '(no subject)');\n  const chunks = [];\n  collectBodies(first.payload, chunks);\n  body = chunks.join('\\n').trim();\n  if (!body && first.text) body = String(first.text).trim();\n  if (!body && first.html) body = stripHtml(first.html);\n  if (!body && first.snippet) body = String(first.snippet).trim();\n  threadId = String(first.threadId || '');\n  messageId = String(first.id || '');\n} else if (first.from) {\n  // ---- simplified Gmail message -----------------------------------\n  source = 'email';\n  const from = splitAddress(first.from);\n  email = from.email;\n  name = from.name;\n  subject = String(first.subject || '(no subject)');\n  if (first.text) body = String(first.text).trim();\n  else if (first.html) body = stripHtml(first.html);\n  else body = String(first.snippet || '').trim();\n  threadId = String(first.threadId || '');\n  messageId = String(first.id || '');\n} else {\n  // ---- webhook / dashboard payload --------------------------------\n  // n8n Webhook node wraps the POSTed JSON in .body; fall back to the\n  // top level so flat payloads (curl, tests) keep working too.\n  const p = (first.body && typeof first.body === 'object') ? first.body : first;\n  email = String(p.email || p.sender_email || '');\n  name = String(p.name || p.full_name || '');\n  subject = String(p.subject || p.title || '');\n  body = String(p.body || p.message || p.text || '');\n  threadId = String(p.threadId || '');\n  messageId = String(p.messageId || '');\n  if (!subject) {\n    subject = '(no subject)';\n    warnings.push('Subject was missing - a default was applied');\n  }\n  if (!body.trim()) warnings.push('Request body was empty');\n}\n\nemail = String(email).trim().toLowerCase();\nconst bracketed = email.match(/<([^>]+)>/);\nif (bracketed) email = bracketed[1].trim();\n\nif (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {\n  warnings.push('Sender address missing or invalid - routed to human review');\n  email = 'unverified-sender@invalid.local';\n}\nif (!name) name = email.split('@')[0];\nif (body.length > 8000) {\n  body = body.slice(0, 8000);\n  warnings.push('Message was truncated to 8000 characters');\n}\n\nreturn [\n  {\n    json: {\n      email,\n      name,\n      subject,\n      body,\n      threadId,\n      messageId,\n      source,\n      receivedAt: new Date().toISOString(),\n      intakeWarnings: warnings,\n    },\n  },\n];"
+        "jsCode": "// Normalises the two entry points into a single request shape:\n//   1. Gmail Trigger  (raw Gmail message, Simplify = false)\n//   2. Webhook Intake (JSON body from the dashboard / external system)\nconst first = $input.first().json;\nconst warnings = [];\n\nfunction decodeBase64Url(data) {\n  try {\n    return Buffer.from(data, 'base64url').toString('utf8');\n  } catch (e) {\n    return '';\n  }\n}\n\nfunction collectBodies(payload, out) {\n  if (!payload) return;\n  if (payload.body && payload.body.data) out.push(decodeBase64Url(payload.body.data));\n  (payload.parts || []).forEach((part) => collectBodies(part, out));\n}\n\nfunction stripHtml(html) {\n  return String(html)\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\n// n8n's Gmail trigger/node can hand header fields back either as plain\n// strings or as nested objects ({ text } or { value: [{ name, address }] }).\n// Flatten any of those shapes to text so parsing never yields \"[object Object]\".\nfunction asText(value) {\n  if (value === null || value === undefined) return '';\n  if (typeof value === 'string') return value;\n  if (typeof value === 'number' || typeof value === 'boolean') return String(value);\n  if (typeof value === 'object') {\n    if (typeof value.text === 'string') return value.text;\n    if (typeof value.address === 'string') {\n      return value.name ? value.name + ' <' + value.address + '>' : value.address;\n    }\n    if (value.value !== undefined) {\n      const v = value.value;\n      if (typeof v === 'string') return v;\n      if (Array.isArray(v)) {\n        return v\n          .map((item) => {\n            if (item === null || item === undefined) return '';\n            if (typeof item === 'string') return item;\n            if (typeof item === 'object') {\n              if (typeof item.text === 'string') return item.text;\n              if (typeof item.address === 'string') {\n                return item.name ? item.name + ' <' + item.address + '>' : item.address;\n              }\n            }\n            return '';\n          })\n          .filter(Boolean)\n          .join(', ');\n      }\n    }\n  }\n  return String(value);\n}\n\nfunction splitAddress(raw) {\n  const text = asText(raw);\n  const angled = text.match(/^(.*)<([^>]+)>/);\n  if (angled) {\n    return {\n      name: angled[1].trim().replace(/^\"|\"$/g, ''),\n      email: angled[2].trim(),\n    };\n  }\n  const value = text.trim();\n  return { name: value.split('@')[0], email: value };\n}\n\nlet email = '';\nlet name = '';\nlet subject = '';\nlet body = '';\nlet threadId = '';\nlet messageId = '';\nlet requestId = '';\nlet source = 'webhook';\n\nif (first.payload && Array.isArray(first.payload.headers)) {\n  // ---- raw Gmail message ------------------------------------------\n  source = 'email';\n  const headers = {};\n  first.payload.headers.forEach((h) => {\n    headers[String(h.name).toLowerCase()] = h.value;\n  });\n  const from = splitAddress(headers.from);\n  email = from.email;\n  name = from.name;\n  subject = String(asText(headers.subject) || '(no subject)');\n  const chunks = [];\n  collectBodies(first.payload, chunks);\n  body = chunks.join('\\n').trim();\n  if (!body && first.text) body = asText(first.text).trim();\n  if (!body && first.html) body = stripHtml(asText(first.html));\n  if (!body && first.snippet) body = asText(first.snippet).trim();\n  threadId = String(first.threadId || '');\n  messageId = String(first.id || '');\n} else if (first.from) {\n  // ---- simplified Gmail message -----------------------------------\n  source = 'email';\n  const from = splitAddress(first.from);\n  email = from.email;\n  name = from.name;\n  subject = String(asText(first.subject) || '(no subject)');\n  if (first.text) body = asText(first.text).trim();\n  else if (first.html) body = stripHtml(asText(first.html));\n  else body = asText(first.snippet).trim();\n  threadId = String(first.threadId || '');\n  messageId = String(first.id || '');\n} else {\n  // ---- webhook / dashboard payload --------------------------------\n  // Shared-secret check for the dashboard -> n8n handoff. Validation is\n  // skipped when N8N_WEBHOOK_SECRET is not configured on the n8n instance.\n  let expectedSecret = '';\n  try {\n    expectedSecret = String($env.N8N_WEBHOOK_SECRET || '');\n  } catch (e) {\n    expectedSecret = '';\n  }\n  if (expectedSecret) {\n    const headers = first.headers || {};\n    let provided = '';\n    for (const key of Object.keys(headers)) {\n      if (key.toLowerCase() === 'x-webhook-secret') {\n        provided = String(headers[key]);\n        break;\n      }\n    }\n    if (provided !== expectedSecret) {\n      throw new Error('Webhook intake rejected: missing or invalid x-webhook-secret');\n    }\n  }\n\n  // n8n Webhook node wraps the POSTed JSON in .body; fall back to the\n  // top level so flat payloads (curl, tests) keep working too.\n  const p = (first.body && typeof first.body === 'object') ? first.body : first;\n  email = String(p.email || p.sender_email || '');\n  name = String(p.name || p.full_name || '');\n  subject = String(p.subject || p.title || '');\n  body = String(p.body || p.message || p.text || '');\n  threadId = String(p.threadId || '');\n  messageId = String(p.messageId || '');\n  // Requests already stored by the dashboard/webhook intake carry their row\n  // id so this workflow analyses THAT row instead of creating a duplicate.\n  requestId = String(p.requestId || p.request_id || '');\n  if (!subject) {\n    subject = '(no subject)';\n    warnings.push('Subject was missing - a default was applied');\n  }\n  if (!body.trim()) warnings.push('Request body was empty');\n}\n\nemail = String(email).trim().toLowerCase();\nconst bracketed = email.match(/<([^>]+)>/);\nif (bracketed) email = bracketed[1].trim();\n\nif (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {\n  warnings.push('Sender address missing or invalid - routed to human review');\n  email = 'unverified-sender@invalid.local';\n}\nif (!name) name = email.split('@')[0];\nif (body.length > 8000) {\n  body = body.slice(0, 8000);\n  warnings.push('Message was truncated to 8000 characters');\n}\n\nreturn [\n  {\n    json: {\n      email,\n      name,\n      subject,\n      body,\n      threadId,\n      messageId,\n      requestId,\n      source,\n      receivedAt: new Date().toISOString(),\n      intakeWarnings: warnings,\n    },\n  },\n];"
       }
     },
     {
@@ -156,11 +156,81 @@
         420
       ],
       "parameters": {
-        "jsCode": "// Builds the prompt context for the AI agent and the column-aligned record\n// for the \"Create Request\" row (auto-mapped with \"Inputs to Ignore\").\nfunction safeFirst(nodeName) {\n  try {\n    const item = $(nodeName).first();\n    return item ? item.json : null;\n  } catch (e) {\n    return null; // node did not run on this branch\n  }\n}\n\nconst intake = safeFirst('Normalize Request') || {};\nconst found = safeFirst('Find Customer');\nconst created = safeFirst('Create Customer');\n\nlet customer = null;\nif (found && found.email) customer = found;\nelse if (created && created.email) customer = created;\n\nconst context = {\n  request: {\n    subject: intake.subject,\n    body: intake.body,\n    sender_email: intake.email,\n    sender_name: intake.name,\n    source: intake.source,\n    received_at: intake.receivedAt,\n    intake_warnings: intake.intakeWarnings || [],\n  },\n  customer: customer\n    ? {\n        id: customer.id,\n        full_name: customer.full_name,\n        plan: customer.plan,\n        lifetime_value: customer.lifetime_value,\n        open_requests: customer.open_requests,\n        notes: customer.notes || null,\n      }\n    : null,\n};\n\nreturn [\n  {\n    json: {\n      sender_email: intake.email,\n      subject: intake.subject,\n      body: intake.body,\n      source: intake.source,\n      thread_id: intake.threadId || null,\n      message_id: intake.messageId || null,\n      customer_id: customer ? customer.id : null,\n      status: 'analyzing',\n      context: JSON.stringify(context, null, 2),\n      customerKnown: Boolean(customer),\n      intakeWarnings: intake.intakeWarnings || [],\n    },\n  },\n];"
+        "jsCode": "// Builds the prompt context for the AI agent and the column-aligned record\n// for the \"Create Request\" row (auto-mapped with \"Inputs to Ignore\").\nfunction safeFirst(nodeName) {\n  try {\n    const item = $(nodeName).first();\n    return item ? item.json : null;\n  } catch (e) {\n    return null; // node did not run on this branch\n  }\n}\n\nconst intake = safeFirst('Normalize Request') || {};\nconst found = safeFirst('Find Customer');\nconst created = safeFirst('Create Customer');\n\nlet customer = null;\nif (found && found.email) customer = found;\nelse if (created && created.email) customer = created;\n\nconst context = {\n  request: {\n    subject: intake.subject,\n    body: intake.body,\n    sender_email: intake.email,\n    sender_name: intake.name,\n    source: intake.source,\n    received_at: intake.receivedAt,\n    intake_warnings: intake.intakeWarnings || [],\n  },\n  customer: customer\n    ? {\n        id: customer.id,\n        full_name: customer.full_name,\n        plan: customer.plan,\n        lifetime_value: customer.lifetime_value,\n        open_requests: customer.open_requests,\n        notes: customer.notes || null,\n      }\n    : null,\n};\n\nreturn [\n  {\n    json: {\n      sender_email: intake.email,\n      subject: intake.subject,\n      body: intake.body,\n      source: intake.source,\n      thread_id: intake.threadId || null,\n      message_id: intake.messageId || null,\n      customer_id: customer ? customer.id : null,\n      status: 'analyzing',\n      requestId: intake.requestId || '',\n      context: JSON.stringify(context, null, 2),\n      customerKnown: Boolean(customer),\n      intakeWarnings: intake.intakeWarnings || [],\n    },\n  },\n];"
       }
     },
     {
       "id": "00000000-0000-4000-8000-000000000009",
+      "name": "Existing Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1240,
+        420
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000010",
+              "leftValue": "={{ !!$json.requestId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000011",
+      "name": "Update Existing Request",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1460,
+        200
+      ],
+      "parameters": {
+        "operation": "update",
+        "tableId": "requests",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "analyzing"
+            }
+          ]
+        },
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.requestId }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueErrorOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000012",
       "name": "Create Request",
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1,
@@ -172,12 +242,12 @@
         "operation": "create",
         "tableId": "requests",
         "dataToSend": "autoMapInputData",
-        "inputsToIgnore": "context,customerKnown,intakeWarnings"
+        "inputsToIgnore": "context,customerKnown,intakeWarnings,requestId"
       },
       "onError": "continueErrorOutput"
     },
     {
-      "id": "00000000-0000-4000-8000-000000000010",
+      "id": "00000000-0000-4000-8000-000000000013",
       "name": "Intake Failure Alert",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.3,
@@ -189,22 +259,22 @@
         "assignments": {
           "assignments": [
             {
-              "id": "00000000-0000-4000-8000-000000000011",
+              "id": "00000000-0000-4000-8000-000000000014",
               "name": "to",
               "type": "string",
               "value": "customer-ops@yourcompany.com"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000012",
+              "id": "00000000-0000-4000-8000-000000000015",
               "name": "subject",
               "type": "string",
               "value": "[Customer Ops] FAILED to record a new request"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000013",
+              "id": "00000000-0000-4000-8000-000000000016",
               "name": "message",
               "type": "string",
-              "value": "='The intake step failed, so this request is NOT stored in Supabase and needs manual handling.\\n\\nSender: ' + $('Normalize Request').first().json.email + '\\nSubject: ' + $('Normalize Request').first().json.subject + '\\n\\nError: ' + JSON.stringify($json).slice(0, 500)"
+              "value": "={{ 'The intake step failed, so this request could not be stored in Supabase and needs manual handling.\\n\\nSender: ' + $('Normalize Request').first().json.email + '\\nSubject: ' + $('Normalize Request').first().json.subject + '\\n\\nError: ' + JSON.stringify($json).slice(0, 500) }}"
             }
           ]
         },
@@ -212,7 +282,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000014",
+      "id": "00000000-0000-4000-8000-000000000017",
       "name": "Send Intake Failure Alert",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
@@ -232,7 +302,7 @@
       "onError": "continueRegularOutput"
     },
     {
-      "id": "00000000-0000-4000-8000-000000000015",
+      "id": "00000000-0000-4000-8000-000000000018",
       "name": "Log Request Created",
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1,
@@ -267,7 +337,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000016",
+      "id": "00000000-0000-4000-8000-000000000019",
       "name": "Mark Email Read",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
@@ -282,7 +352,7 @@
       "onError": "continueRegularOutput"
     },
     {
-      "id": "00000000-0000-4000-8000-000000000017",
+      "id": "00000000-0000-4000-8000-000000000020",
       "name": "AI Agent",
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 1.6,
@@ -292,7 +362,7 @@
       ],
       "parameters": {
         "promptType": "define",
-        "text": "={{ $json.context }}",
+        "text": "={{ $('Prepare Context').first().json.context }}",
         "options": {
           "systemMessage": "You are the AI analyst for an AI-powered customer operations system.\n\nYou receive ONE customer request as JSON with two keys:\n- \"request\": the incoming customer message (sender, subject, body, source, intake_warnings)\n- \"customer\": the CRM record for this sender, or null when unknown\n\nAnalyse the request and respond with ONLY a single JSON object. No markdown, no commentary, no code fences.\n\nRequired schema:\n{\n  \"intent\": \"machine-readable intent, e.g. login_issue, password_reset, billing_question, plan_upgrade, refund_request, bug_report, outage, cancel_subscription, feedback, shipping, other\",\n  \"category\": \"one of: account_access, billing, technical, shipping, product, feedback, compliance, other\",\n  \"priority\": \"one of: low, medium, high, urgent\",\n  \"sentiment\": \"one of: positive, neutral, negative, angry\",\n  \"summary\": \"1-2 sentence summary of what the customer wants\",\n  \"recommended_action\": \"the concrete next step for the customer operations team\",\n  \"decision\": \"one of: auto_resolve, human_review, escalate\",\n  \"confidence\": 0.0 to 1.0,\n  \"reply\": {\n    \"subject\": \"subject line for the reply email\",\n    \"body\": \"complete, customer-ready plain-text reply\"\n  }\n}\n\nDecision rules:\n- auto_resolve: only routine, low-risk requests you can fully answer from the context (plan questions, FAQs, password reset instructions, positive feedback). The reply must be complete and ready to send.\n- human_review: anything that changes account state, involves money (refunds, credits, cancellations), legal or compliance topics, ambiguous intent, missing information, technical incidents, or when confidence is below 0.7.\n- escalate: outages, security or data-loss incidents, threats, legal action, or angry enterprise customers.\n\nOther rules:\n- Never invent prices, policies, refunds, discounts, account data or deadlines that are not in the context. If a needed fact is missing, choose human_review.\n- priority \"urgent\" is reserved for time-critical or business-stopping issues.\n- If request.intake_warnings is non-empty or customer is null, never choose auto_resolve.\n- When decision is not auto_resolve, still fill reply.body with what a human agent should send.\n- Keep replies polite, specific and free of placeholders such as [insert ...]."
         }
@@ -303,7 +373,7 @@
       "waitBetweenTries": 5000
     },
     {
-      "id": "00000000-0000-4000-8000-000000000018",
+      "id": "00000000-0000-4000-8000-000000000021",
       "name": "Anthropic Claude",
       "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
       "typeVersion": 1.3,
@@ -322,7 +392,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000019",
+      "id": "00000000-0000-4000-8000-000000000022",
       "name": "AI Failure Handler",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -335,7 +405,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000020",
+      "id": "00000000-0000-4000-8000-000000000023",
       "name": "Parse Analysis",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -344,11 +414,11 @@
         340
       ],
       "parameters": {
-        "jsCode": "// Parses + validates the model output and applies deterministic guardrails.\n// The model never routes on its own: every safety rule below is plain code.\nconst agentItem = $('AI Agent').first().json;\nconst intake = $('Normalize Request').first().json;\nconst raw = typeof agentItem.output === 'string' ? agentItem.output.trim() : '';\nconst warnings = intake.intakeWarnings || [];\n\nfunction parseJsonObject(text) {\n  if (!text) return null;\n  const cleaned = text.replace(/^\\`\\`\\`(?:json)?/i, '').replace(/\\`\\`\\`$/i, '').trim();\n  const start = cleaned.indexOf('{');\n  const end = cleaned.lastIndexOf('}');\n  if (start === -1 || end <= start) return null;\n  try {\n    const parsed = JSON.parse(cleaned.slice(start, end + 1));\n    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)\n      ? parsed\n      : null;\n  } catch (e) {\n    return null;\n  }\n}\n\nconst parsed = parseJsonObject(raw);\n\nif (!parsed) {\n  // No usable model output: never guess, hand the request to a human.\n  return [\n    {\n      json: {\n        intent: 'unclassified',\n        category: 'other',\n        priority: 'high',\n        sentiment: 'neutral',\n        summary: 'AI analysis unavailable - the model output could not be parsed.',\n        recommended_action:\n          'Manually triage this request: read the original message, classify it and reply to the customer.',\n        decision: 'human_review',\n        confidence: 0,\n        reply: { subject: '', body: '' },\n        needsHuman: true,\n        analysisFailed: true,\n        aiError:\n          (agentItem.aiError || 'Model returned unparseable output').slice(0, 500),\n        rawAnalysis: { raw: raw.slice(0, 2000), parseError: true },\n      },\n    },\n  ];\n}\n\nconst priorities = ['low', 'medium', 'high', 'urgent'];\nconst sentiments = ['positive', 'neutral', 'negative', 'angry'];\nconst decisions = ['auto_resolve', 'human_review', 'escalate'];\nconst categories = [\n  'account_access',\n  'billing',\n  'technical',\n  'shipping',\n  'product',\n  'feedback',\n  'compliance',\n  'other',\n];\n\nconst intent =\n  typeof parsed.intent === 'string' && parsed.intent\n    ? parsed.intent.toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 60)\n    : 'other';\nconst category = categories.includes(parsed.category) ? parsed.category : 'other';\nconst priority = priorities.includes(parsed.priority) ? parsed.priority : 'medium';\nconst sentiment = sentiments.includes(parsed.sentiment) ? parsed.sentiment : 'neutral';\nconst summary =\n  typeof parsed.summary === 'string' ? parsed.summary.slice(0, 1000) : '';\nconst recommendedAction =\n  typeof parsed.recommended_action === 'string'\n    ? parsed.recommended_action.slice(0, 1000)\n    : 'Review the request manually';\nlet decision = decisions.includes(parsed.decision) ? parsed.decision : 'human_review';\nlet confidence =\n  typeof parsed.confidence === 'number' && isFinite(parsed.confidence)\n    ? Math.min(1, Math.max(0, parsed.confidence))\n    : 0;\nconst reply = {\n  subject:\n    parsed.reply && typeof parsed.reply.subject === 'string' ? parsed.reply.subject : '',\n  body:\n    parsed.reply && typeof parsed.reply.body === 'string' ? parsed.reply.body : '',\n};\n\n// ---- deterministic guardrails -----------------------------------------\nif (confidence < 0.6) decision = decision === 'auto_resolve' ? 'human_review' : decision;\nif (priority === 'urgent' && decision === 'auto_resolve') decision = 'escalate';\nif (sentiment === 'angry' && decision === 'auto_resolve') decision = 'human_review';\nif (warnings.length > 0 && decision === 'auto_resolve') decision = 'human_review';\nif (!intake.customerKnown && decision === 'auto_resolve') decision = 'human_review';\nif (decision === 'auto_resolve' && !reply.body) decision = 'human_review';\n\nreturn [\n  {\n    json: {\n      intent,\n      category,\n      priority,\n      sentiment,\n      summary,\n      recommended_action: recommendedAction,\n      decision,\n      confidence,\n      reply,\n      needsHuman: decision !== 'auto_resolve',\n      analysisFailed: false,\n      aiError: '',\n      rawAnalysis: parsed,\n    },\n  },\n];"
+        "jsCode": "// Parses + validates the model output and applies deterministic guardrails.\n// The model never routes on its own: every safety rule below is plain code.\n// Read $input, not $('AI Agent'): on the success path the input is the AI\n// Agent output, and on the error path it is the \"AI Failure Handler\" output\n// (which carries the real aiError). Reading the node directly would discard\n// the error detail and always report the generic \"unparseable output\".\nconst agentItem = $input.first().json;\nconst intake = $('Normalize Request').first().json;\nconst raw = typeof agentItem.output === 'string' ? agentItem.output.trim() : '';\nconst warnings = intake.intakeWarnings || [];\n\nfunction parseJsonObject(text) {\n  if (!text) return null;\n  const cleaned = text\n    .replace(/^\\`\\`\\`(?:json)?/i, '')\n    .replace(/\\`\\`\\`$/i, '')\n    // Models occasionally emit raw CR/LF inside JSON string values (illegal in\n    // JSON) or hard-wrap their output. Raw newlines are insignificant\n    // whitespace between tokens and invalid inside strings, so stripping them\n    // repairs the payload while preserving escaped \\n sequences.\n    .replace(/[\\r\\n]+/g, '')\n    .trim();\n  const start = cleaned.indexOf('{');\n  const end = cleaned.lastIndexOf('}');\n  if (start === -1 || end <= start) return null;\n  try {\n    const parsed = JSON.parse(cleaned.slice(start, end + 1));\n    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)\n      ? parsed\n      : null;\n  } catch (e) {\n    return null;\n  }\n}\n\nconst parsed = parseJsonObject(raw);\n\nif (!parsed) {\n  // No usable model output: never guess, hand the request to a human.\n  return [\n    {\n      json: {\n        intent: 'unclassified',\n        category: 'other',\n        priority: 'high',\n        sentiment: 'neutral',\n        summary: 'AI analysis unavailable - the model output could not be parsed.',\n        recommended_action:\n          'Manually triage this request: read the original message, classify it and reply to the customer.',\n        decision: 'human_review',\n        confidence: 0,\n        reply: { subject: '', body: '' },\n        needsHuman: true,\n        analysisFailed: true,\n        aiError:\n          (agentItem.aiError || 'Model returned unparseable output').slice(0, 500),\n        rawAnalysis: { raw: raw.slice(0, 2000), parseError: true },\n      },\n    },\n  ];\n}\n\nconst priorities = ['low', 'medium', 'high', 'urgent'];\nconst sentiments = ['positive', 'neutral', 'negative', 'angry'];\nconst decisions = ['auto_resolve', 'human_review', 'escalate'];\nconst categories = [\n  'account_access',\n  'billing',\n  'technical',\n  'shipping',\n  'product',\n  'feedback',\n  'compliance',\n  'other',\n];\n\nconst intent =\n  typeof parsed.intent === 'string' && parsed.intent\n    ? parsed.intent.toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 60)\n    : 'other';\nconst category = categories.includes(parsed.category) ? parsed.category : 'other';\nconst priority = priorities.includes(parsed.priority) ? parsed.priority : 'medium';\nconst sentiment = sentiments.includes(parsed.sentiment) ? parsed.sentiment : 'neutral';\nconst summary =\n  typeof parsed.summary === 'string' ? parsed.summary.slice(0, 1000) : '';\nconst recommendedAction =\n  typeof parsed.recommended_action === 'string'\n    ? parsed.recommended_action.slice(0, 1000)\n    : 'Review the request manually';\nlet decision = decisions.includes(parsed.decision) ? parsed.decision : 'human_review';\nlet confidence =\n  typeof parsed.confidence === 'number' && isFinite(parsed.confidence)\n    ? Math.min(1, Math.max(0, parsed.confidence))\n    : 0;\nconst reply = {\n  subject:\n    parsed.reply && typeof parsed.reply.subject === 'string' ? parsed.reply.subject : '',\n  body:\n    parsed.reply && typeof parsed.reply.body === 'string' ? parsed.reply.body : '',\n};\n\n// ---- deterministic guardrails -----------------------------------------\nif (confidence < 0.6) decision = decision === 'auto_resolve' ? 'human_review' : decision;\nif (priority === 'urgent' && decision === 'auto_resolve') decision = 'escalate';\nif (sentiment === 'angry' && decision === 'auto_resolve') decision = 'human_review';\nif (warnings.length > 0 && decision === 'auto_resolve') decision = 'human_review';\nif (!intake.customerKnown && decision === 'auto_resolve') decision = 'human_review';\nif (decision === 'auto_resolve' && !reply.body) decision = 'human_review';\n\nreturn [\n  {\n    json: {\n      intent,\n      category,\n      priority,\n      sentiment,\n      summary,\n      recommended_action: recommendedAction,\n      decision,\n      confidence,\n      reply,\n      needsHuman: decision !== 'auto_resolve',\n      analysisFailed: false,\n      aiError: '',\n      rawAnalysis: parsed,\n    },\n  },\n];"
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000021",
+      "id": "00000000-0000-4000-8000-000000000024",
       "name": "Log Analysis",
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1,
@@ -364,7 +434,7 @@
           "fieldValues": [
             {
               "fieldId": "request_id",
-              "fieldValue": "={{ $(\"Create Request\").first().json.id }}"
+              "fieldValue": "={{ $('Prepare Context').first().json.requestId || $('Create Request').first().json.id }}"
             },
             {
               "fieldId": "type",
@@ -383,7 +453,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000022",
+      "id": "00000000-0000-4000-8000-000000000025",
       "name": "Requires Human?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -401,8 +471,8 @@
           },
           "conditions": [
             {
-              "id": "00000000-0000-4000-8000-000000000023",
-              "leftValue": "={{ $json.needsHuman }}",
+              "id": "00000000-0000-4000-8000-000000000026",
+              "leftValue": "={{ $('Parse Analysis').first().json.needsHuman }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -417,7 +487,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000024",
+      "id": "00000000-0000-4000-8000-000000000027",
       "name": "Build Review Alert",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.3,
@@ -429,22 +499,22 @@
         "assignments": {
           "assignments": [
             {
-              "id": "00000000-0000-4000-8000-000000000025",
+              "id": "00000000-0000-4000-8000-000000000028",
               "name": "to",
               "type": "string",
               "value": "customer-ops@yourcompany.com"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000026",
+              "id": "00000000-0000-4000-8000-000000000029",
               "name": "subject",
               "type": "string",
               "value": "={{ '[Customer Ops] ' + $('Parse Analysis').first().json.priority.toUpperCase() + ' - human review required: ' + $('Normalize Request').first().json.subject }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000027",
+              "id": "00000000-0000-4000-8000-000000000030",
               "name": "message",
               "type": "string",
-              "value": "='A customer request requires human review.\\n\\nFrom: ' + $('Normalize Request').first().json.name + ' <' + $('Normalize Request').first().json.email + '>\\nSubject: ' + $('Normalize Request').first().json.subject + '\\nPriority: ' + $('Parse Analysis').first().json.priority + '\\nSentiment: ' + $('Parse Analysis').first().json.sentiment + '\\nDecision: ' + $('Parse Analysis').first().json.decision + '\\nConfidence: ' + $('Parse Analysis').first().json.confidence + '\\n\\nSummary: ' + $('Parse Analysis').first().json.summary + '\\nRecommended action: ' + $('Parse Analysis').first().json.recommended_action + ($('Parse Analysis').first().json.aiError ? '\\n\\nAI analysis error: ' + $('Parse Analysis').first().json.aiError : '') + '\\n\\nOriginal message:\\n' + $('Normalize Request').first().json.body + '\\n\\nDashboard: http://localhost:3000/requests/' + $('Create Request').first().json.id"
+              "value": "={{ 'A customer request requires human review.\\n\\nFrom: ' + $('Normalize Request').first().json.name + ' <' + $('Normalize Request').first().json.email + '>\\nSubject: ' + $('Normalize Request').first().json.subject + '\\nPriority: ' + $('Parse Analysis').first().json.priority + '\\nSentiment: ' + $('Parse Analysis').first().json.sentiment + '\\nDecision: ' + $('Parse Analysis').first().json.decision + '\\nConfidence: ' + $('Parse Analysis').first().json.confidence + '\\n\\nSummary: ' + $('Parse Analysis').first().json.summary + '\\nRecommended action: ' + $('Parse Analysis').first().json.recommended_action + ($('Parse Analysis').first().json.aiError ? '\\n\\nAI analysis error: ' + $('Parse Analysis').first().json.aiError : '') + ($('Parse Analysis').first().json.analysisFailed && $('Parse Analysis').first().json.rawAnalysis && $('Parse Analysis').first().json.rawAnalysis.raw ? '\\n\\nRaw model output (for debugging):\\n' + $('Parse Analysis').first().json.rawAnalysis.raw.slice(0, 1000) : '') + '\\n\\nOriginal message:\\n' + $('Normalize Request').first().json.body + '\\n\\nDashboard: http://localhost:3002/requests/' + ($('Prepare Context').first().json.requestId || $('Create Request').first().json.id) }}"
             }
           ]
         },
@@ -452,7 +522,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000028",
+      "id": "00000000-0000-4000-8000-000000000031",
       "name": "Send Review Alert",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
@@ -472,7 +542,7 @@
       "onError": "continueErrorOutput"
     },
     {
-      "id": "00000000-0000-4000-8000-000000000029",
+      "id": "00000000-0000-4000-8000-000000000032",
       "name": "Alert Delivery Failed",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -485,7 +555,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000030",
+      "id": "00000000-0000-4000-8000-000000000033",
       "name": "Set Status Pending Review",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.3,
@@ -497,79 +567,79 @@
         "assignments": {
           "assignments": [
             {
-              "id": "00000000-0000-4000-8000-000000000031",
+              "id": "00000000-0000-4000-8000-000000000034",
               "name": "id",
               "type": "string",
-              "value": "={{ $(\"Create Request\").first().json.id }}"
+              "value": "={{ $('Prepare Context').first().json.requestId || $('Create Request').first().json.id }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000032",
+              "id": "00000000-0000-4000-8000-000000000035",
               "name": "status",
               "type": "string",
               "value": "pending_review"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000033",
+              "id": "00000000-0000-4000-8000-000000000036",
               "name": "decision",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.decision }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000034",
+              "id": "00000000-0000-4000-8000-000000000037",
               "name": "intent",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.intent }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000035",
+              "id": "00000000-0000-4000-8000-000000000038",
               "name": "category",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.category }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000036",
+              "id": "00000000-0000-4000-8000-000000000039",
               "name": "priority",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.priority }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000037",
+              "id": "00000000-0000-4000-8000-000000000040",
               "name": "sentiment",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.sentiment }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000038",
+              "id": "00000000-0000-4000-8000-000000000041",
               "name": "summary",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.summary }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000039",
+              "id": "00000000-0000-4000-8000-000000000042",
               "name": "recommended_action",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.recommended_action }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000040",
+              "id": "00000000-0000-4000-8000-000000000043",
               "name": "confidence",
               "type": "number",
               "value": "={{ $(\"Parse Analysis\").first().json.confidence }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000041",
+              "id": "00000000-0000-4000-8000-000000000044",
               "name": "raw_analysis",
               "type": "object",
               "value": "={{ $(\"Parse Analysis\").first().json.rawAnalysis }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000042",
+              "id": "00000000-0000-4000-8000-000000000045",
               "name": "reply_sent",
               "type": "boolean",
               "value": false
             },
             {
-              "id": "00000000-0000-4000-8000-000000000043",
+              "id": "00000000-0000-4000-8000-000000000046",
               "name": "analyzed_at",
               "type": "string",
               "value": "={{ new Date().toISOString() }}"
@@ -580,7 +650,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000044",
+      "id": "00000000-0000-4000-8000-000000000047",
       "name": "Build Customer Reply",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.3,
@@ -592,19 +662,19 @@
         "assignments": {
           "assignments": [
             {
-              "id": "00000000-0000-4000-8000-000000000045",
+              "id": "00000000-0000-4000-8000-000000000048",
               "name": "to",
               "type": "string",
               "value": "={{ $(\"Normalize Request\").first().json.email }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000046",
+              "id": "00000000-0000-4000-8000-000000000049",
               "name": "subject",
               "type": "string",
               "value": "={{ 'Re: ' + $('Normalize Request').first().json.subject }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000047",
+              "id": "00000000-0000-4000-8000-000000000050",
               "name": "message",
               "type": "string",
               "value": "={{ $('Parse Analysis').first().json.reply.body || 'Thanks for reaching out to us. A member of our team will follow up shortly.' }}"
@@ -615,7 +685,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000048",
+      "id": "00000000-0000-4000-8000-000000000051",
       "name": "Send Customer Reply",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
@@ -635,7 +705,7 @@
       "onError": "continueErrorOutput"
     },
     {
-      "id": "00000000-0000-4000-8000-000000000049",
+      "id": "00000000-0000-4000-8000-000000000052",
       "name": "Handle Send Failure",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -644,11 +714,11 @@
         600
       ],
       "parameters": {
-        "jsCode": "// The customer reply could not be delivered - record why so the request can\n// be retried by a human instead of silently disappearing.\nconst requestId = $('Create Request').first().json.id;\nconst err = $input.first().json || {};\nconst detail =\n  (err.error && err.error.message) ||\n  err.message ||\n  (typeof err.error === 'string' ? err.error : '') ||\n  JSON.stringify(err).slice(0, 300);\n\nreturn [\n  {\n    json: {\n      requestId,\n      lastError: 'Customer reply could not be delivered: ' + String(detail).slice(0, 400),\n    },\n  },\n];"
+        "jsCode": "// The customer reply could not be delivered - record why so the request can\n// be retried by a human instead of silently disappearing.\n// Requests forwarded by the dashboard already have a row (requestId); the\n// Gmail path falls back to the row created by \"Create Request\".\nconst requestId =\n  $('Prepare Context').first().json.requestId || $('Create Request').first().json.id;\nconst err = $input.first().json || {};\nconst detail =\n  (err.error && err.error.message) ||\n  err.message ||\n  (typeof err.error === 'string' ? err.error : '') ||\n  JSON.stringify(err).slice(0, 300);\n\nreturn [\n  {\n    json: {\n      requestId,\n      lastError: 'Customer reply could not be delivered: ' + String(detail).slice(0, 400),\n    },\n  },\n];"
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000050",
+      "id": "00000000-0000-4000-8000-000000000053",
       "name": "Set Status Auto Resolved",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.3,
@@ -660,85 +730,85 @@
         "assignments": {
           "assignments": [
             {
-              "id": "00000000-0000-4000-8000-000000000051",
+              "id": "00000000-0000-4000-8000-000000000054",
               "name": "id",
               "type": "string",
-              "value": "={{ $(\"Create Request\").first().json.id }}"
+              "value": "={{ $('Prepare Context').first().json.requestId || $('Create Request').first().json.id }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000052",
+              "id": "00000000-0000-4000-8000-000000000055",
               "name": "status",
               "type": "string",
               "value": "auto_handled"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000053",
+              "id": "00000000-0000-4000-8000-000000000056",
               "name": "decision",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.decision }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000054",
+              "id": "00000000-0000-4000-8000-000000000057",
               "name": "intent",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.intent }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000055",
+              "id": "00000000-0000-4000-8000-000000000058",
               "name": "category",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.category }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000056",
+              "id": "00000000-0000-4000-8000-000000000059",
               "name": "priority",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.priority }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000057",
+              "id": "00000000-0000-4000-8000-000000000060",
               "name": "sentiment",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.sentiment }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000058",
+              "id": "00000000-0000-4000-8000-000000000061",
               "name": "summary",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.summary }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000059",
+              "id": "00000000-0000-4000-8000-000000000062",
               "name": "recommended_action",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.recommended_action }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000060",
+              "id": "00000000-0000-4000-8000-000000000063",
               "name": "confidence",
               "type": "number",
               "value": "={{ $(\"Parse Analysis\").first().json.confidence }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000061",
+              "id": "00000000-0000-4000-8000-000000000064",
               "name": "raw_analysis",
               "type": "object",
               "value": "={{ $(\"Parse Analysis\").first().json.rawAnalysis }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000062",
+              "id": "00000000-0000-4000-8000-000000000065",
               "name": "reply_sent",
               "type": "boolean",
               "value": true
             },
             {
-              "id": "00000000-0000-4000-8000-000000000063",
+              "id": "00000000-0000-4000-8000-000000000066",
               "name": "analyzed_at",
               "type": "string",
               "value": "={{ new Date().toISOString() }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000064",
+              "id": "00000000-0000-4000-8000-000000000067",
               "name": "resolved_at",
               "type": "string",
               "value": "={{ new Date().toISOString() }}"
@@ -749,7 +819,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000065",
+      "id": "00000000-0000-4000-8000-000000000068",
       "name": "Set Status Failed",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.3,
@@ -761,85 +831,85 @@
         "assignments": {
           "assignments": [
             {
-              "id": "00000000-0000-4000-8000-000000000066",
+              "id": "00000000-0000-4000-8000-000000000069",
               "name": "id",
               "type": "string",
               "value": "={{ $json.requestId }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000067",
+              "id": "00000000-0000-4000-8000-000000000070",
               "name": "status",
               "type": "string",
               "value": "failed"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000068",
+              "id": "00000000-0000-4000-8000-000000000071",
               "name": "decision",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.decision }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000069",
+              "id": "00000000-0000-4000-8000-000000000072",
               "name": "intent",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.intent }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000070",
+              "id": "00000000-0000-4000-8000-000000000073",
               "name": "category",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.category }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000071",
+              "id": "00000000-0000-4000-8000-000000000074",
               "name": "priority",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.priority }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000072",
+              "id": "00000000-0000-4000-8000-000000000075",
               "name": "sentiment",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.sentiment }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000073",
+              "id": "00000000-0000-4000-8000-000000000076",
               "name": "summary",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.summary }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000074",
+              "id": "00000000-0000-4000-8000-000000000077",
               "name": "recommended_action",
               "type": "string",
               "value": "={{ $(\"Parse Analysis\").first().json.recommended_action }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000075",
+              "id": "00000000-0000-4000-8000-000000000078",
               "name": "confidence",
               "type": "number",
               "value": "={{ $(\"Parse Analysis\").first().json.confidence }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000076",
+              "id": "00000000-0000-4000-8000-000000000079",
               "name": "raw_analysis",
               "type": "object",
               "value": "={{ $(\"Parse Analysis\").first().json.rawAnalysis }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000077",
+              "id": "00000000-0000-4000-8000-000000000080",
               "name": "reply_sent",
               "type": "boolean",
               "value": false
             },
             {
-              "id": "00000000-0000-4000-8000-000000000078",
+              "id": "00000000-0000-4000-8000-000000000081",
               "name": "last_error",
               "type": "string",
               "value": "={{ $json.lastError }}"
             },
             {
-              "id": "00000000-0000-4000-8000-000000000079",
+              "id": "00000000-0000-4000-8000-000000000082",
               "name": "analyzed_at",
               "type": "string",
               "value": "={{ new Date().toISOString() }}"
@@ -850,7 +920,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000080",
+      "id": "00000000-0000-4000-8000-000000000083",
       "name": "Update Request Status",
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1,
@@ -877,7 +947,7 @@
       }
     },
     {
-      "id": "00000000-0000-4000-8000-000000000081",
+      "id": "00000000-0000-4000-8000-000000000084",
       "name": "Log Status Activity",
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1,
@@ -990,7 +1060,43 @@
       "main": [
         [
           {
+            "node": "Existing Request?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existing Request?": {
+      "main": [
+        [
+          {
+            "node": "Update Existing Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "Create Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Existing Request": {
+      "main": [
+        [
+          {
+            "node": "Mark Email Read",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Intake Failure Alert",
             "type": "main",
             "index": 0
           }
